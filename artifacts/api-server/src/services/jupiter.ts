@@ -54,7 +54,7 @@ export async function getJupiterQuote(
 export async function buildJupiterSwapTx(
   quote: JupiterQuote,
   userPublicKey: string,
-  prioritizationFeeLamports = 5_000
+  jitoTipLamports = 5_000
 ): Promise<string | null> {
   try {
     const res = await fetch(`${JUPITER_BASE}/swap`, {
@@ -67,7 +67,12 @@ export async function buildJupiterSwapTx(
         quoteResponse: quote,
         userPublicKey,
         wrapAndUnwrapSol: true,
-        prioritizationFeeLamports,
+        // Jupiter only embeds a real Jito tip instruction (a SOL transfer to
+        // one of Jito's tip accounts) when this is an OBJECT with
+        // jitoTipLamports — a plain number here just sets Solana's normal
+        // priority fee instead, and Jito's block engine then rejects the
+        // bundle outright for having no tip at all.
+        prioritizationFeeLamports: { jitoTipLamports },
       }),
       signal: AbortSignal.timeout(15_000),
     });
