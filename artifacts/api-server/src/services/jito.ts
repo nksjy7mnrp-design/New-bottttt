@@ -5,6 +5,14 @@
 
 import { logger } from "../lib/logger";
 
+/** Default tip (in lamports) used when a user hasn't configured their own
+ *  jitoTipLamports in Snipe Filters. 10,000 lamports = 0.00001 SOL. */
+export function getJitoTipLamports(): number {
+  const envDefault = process.env["JITO_DEFAULT_TIP_LAMPORTS"];
+  const parsed = envDefault ? parseInt(envDefault, 10) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 10_000;
+}
+
 export async function sendJitoBundle(
   serializedBase64Txs: string[]
 ): Promise<string | null> {
