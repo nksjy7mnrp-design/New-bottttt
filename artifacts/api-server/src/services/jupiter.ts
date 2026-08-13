@@ -7,6 +7,8 @@
  * api.jup.ag with a free API key from portal.jup.ag for higher reliability.
  */
 
+import { logger } from "../lib/logger";
+
 const JUPITER_API_KEY = process.env["JUPITER_API_KEY"] ?? "";
 const JUPITER_BASE = JUPITER_API_KEY
   ? "https://api.jup.ag/swap/v1"
@@ -67,19 +69,22 @@ export async function buildJupiterSwapTx(
         quoteResponse: quote,
         userPublicKey,
         wrapAndUnwrapSol: true,
-        // Jupiter only embeds a real Jito tip instruction (a SOL transfer to
-        // one of Jito's tip accounts) when this is an OBJECT with
-        // jitoTipLamports — a plain number here just sets Solana's normal
-        // priority fee instead, and Jito's block engine then rejects the
-        // bundle outright for having no tip at all.
         prioritizationFeeLamports: { jitoTipLamports },
       }),
       signal: AbortSignal.timeout(15_000),
     });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { swapTransaction?: string };
+    const bodyText = await res.text();
+    if (!res.ok) {
+      logger.warn(
+        { status: res.status, body: bodyText.slice(0, 500) },
+        "Jupiter /swap build failed — see body for the actual reason"
+      );
+      return null;
+    }
+    const data = JSON.parse(bodyText) as { swapTransaction?: string };
     return data.swapTransaction ?? null;
-  } catch {
+  } catch (err) {
+    logger.warn({ err }, "Jupiter /swap request failed");
     return null;
   }
 }
