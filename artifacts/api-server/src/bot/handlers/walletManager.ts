@@ -102,9 +102,9 @@ export async function handleWalletManager(ctx: Context): Promise<void> {
 
   const chains = ["SOL", "ETH", "BASE", "BSC"];
   
-  // 1. Create the new BIG button for Seed Phrase Import (Defaults to active chain)
+  // 1. BIG button for Seed Phrase Import (Now routes to chain selector menu)
   const importPhraseRow = [
-    Markup.button.callback(`🌱 Import Seed Phrase (${chain})`, `import_method:${chain}:phrase`)
+    Markup.button.callback(`🌱 Import Seed Phrase`, `import_phrase_menu`)
   ];
 
   // 2. Split into pairs so the wider buttons fit perfectly on mobile screens
@@ -161,6 +161,30 @@ export async function handleWalletManager(ctx: Context): Promise<void> {
   ]);
 
   await sendOrEdit(ctx, text, { parse_mode: "HTML", ...keyboard });
+}
+
+// ── Seed Phrase Chain Selection Menu ──────────────────────────────────────────
+export async function handleImportPhraseMenu(ctx: Context): Promise<void> {
+  const text = [
+    `🌱 <b>Import Seed Phrase</b>`,
+    ``,
+    `Which network is this seed phrase for?`,
+  ].join("\n");
+
+  await sendOrEdit(ctx, text, {
+    parse_mode: "HTML",
+    ...Markup.inlineKeyboard([
+      [
+        Markup.button.callback("SOL", "import_method:SOL:phrase"),
+        Markup.button.callback("ETH", "import_method:ETH:phrase"),
+      ],
+      [
+        Markup.button.callback("BASE", "import_method:BASE:phrase"),
+        Markup.button.callback("BSC", "import_method:BSC:phrase"),
+      ],
+      [Markup.button.callback("⬅️ Back", "wallet_manager")],
+    ]),
+  });
 }
 
 // ── Deposit screen — shows full address + balance + instructions ─────────────
