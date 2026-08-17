@@ -17,6 +17,7 @@ import {
   handleDeposit,
   handleGenerateWallet,
   handleImportWallet,
+  handleImportMethodChoice,
   processImportedKey,
   getPendingImport,
   handleWalletDetail,
@@ -293,7 +294,12 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
     await handleGenerateWallet(ctx, chain);
   });
 
-  bot.action(/^import_wallet:(.+)$/, async (ctx) => {
+    bot.action(/^import_method:(.+):(key|phrase)$/, async (ctx) => {
+    const match = ctx.match as RegExpMatchArray;
+    const chain = match[1] ?? "SOL";
+    const method = (match[2] ?? "key") as "key" | "phrase";
+    await handleImportMethodChoice(ctx, chain, method);
+  });
     const chain = (ctx.match as RegExpMatchArray)[1] ?? "SOL";
     await handleImportWallet(ctx, chain);
   });
