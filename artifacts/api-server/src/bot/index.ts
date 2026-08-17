@@ -62,7 +62,7 @@ import { handleBotStats } from "./handlers/botStats";
 
 import { handleHelpGuide } from "./handlers/helpGuide";
 import {
-    handleCAAnalysis,
+  handleCAAnalysis,
   handleAnalyzeCallback,
   handleRugCheckCallback,
   detectCAType,
@@ -124,18 +124,10 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
 
   // ── Global middleware: instantly dismiss the loading spinner on every
   //    inline-button tap so users never see the clock animation.
-  //    IMPORTANT: individual handlers must NOT call ctx.answerCbQuery again —
-  //    answering the same query twice throws and triggers bot.catch. ───────
   bot.use(async (ctx, next) => {
     const fromId = ctx.from?.id;
     if (ctx.callbackQuery) {
-      // Fire-and-forget — we don't wait; handler runs in parallel
       ctx.answerCbQuery().catch(() => {});
-      // Any button tap = navigation away from a pending text prompt.
-      // Cancel stale multi-step flows (import / rename / filter / custom-buy /
-      // copy-trade) so the next text message is never consumed by an
-      // abandoned step. Handlers that START a flow set their state after
-      // this middleware runs, so fresh flows are unaffected.
       if (fromId) clearAllPendingFlows(fromId);
     } else if (
       fromId &&
@@ -143,7 +135,6 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
       "text" in ctx.message &&
       ctx.message.text.startsWith("/")
     ) {
-      // Slash commands are explicit navigation — cancel stale flows too
       clearAllPendingFlows(fromId);
     }
     return next();
@@ -208,18 +199,15 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   bot.action("bot_stats",      handleBotStats);
   bot.action("help_guide",     handleHelpGuide);
 
-  // Delete the message containing this button (used on key-export screens)
   bot.action("del_msg", async (ctx) => {
     await ctx.deleteMessage().catch(() => {});
   });
 
-  // Deposit screen — shows full address + balance + trading shortcuts
   bot.action(/^deposit:(.+)$/, async (ctx) => {
     const chain = (ctx.match as RegExpMatchArray)[1] ?? "SOL";
     await handleDeposit(ctx, chain);
   });
 
-  // Deposit command shortcut
   bot.command("deposit", async (ctx) => {
     const user = await db.query.usersTable.findFirst({
       where: eq(usersTable.telegramId, ctx.from.id),
@@ -227,7 +215,6 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
     await handleDeposit(ctx, user?.activeChain ?? "SOL");
   });
 
-  // Prompt user to paste a CA to buy — guides them from deposit → trade
   bot.action("prompt_buy", async (ctx) => {
     await ctx.reply(
       [
@@ -257,8 +244,7 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
     );
   });
 
-  // Dynamic actions with parameters
-    bot.action(/^analyze:(.+)$/, async (ctx) => {
+  bot.action(/^analyze:(.+)$/, async (ctx) => {
     const ca = (ctx.match as RegExpMatchArray)[1] ?? "";
     await handleAnalyzeCallback(ctx, ca);
   });
@@ -294,12 +280,14 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
     await handleGenerateWallet(ctx, chain);
   });
 
-    bot.action(/^import_method:(.+):(key|phrase)$/, async (ctx) => {
+  bot.action(/^import_method:(.+):(key|phrase)$/, async (ctx) => {
     const match = ctx.match as RegExpMatchArray;
     const chain = match[1] ?? "SOL";
     const method = (match[2] ?? "key") as "key" | "phrase";
     await handleImportMethodChoice(ctx, chain, method);
   });
+
+  bot.action(/^import_wallet:(.+)$/, async (ctx) => {
     const chain = (ctx.match as RegExpMatchArray)[1] ?? "SOL";
     await handleImportWallet(ctx, chain);
   });
@@ -315,7 +303,7 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
     await handleRenameWallet(ctx, id);
   });
 
-    bot.action(/^wallet_activate:(\d+)$/, async (ctx) => {
+  bot.action(/^wallet_activate:(\d+)$/, async (ctx) => {
     const id = parseInt((ctx.match as RegExpMatchArray)[1] ?? "0", 10);
     await handleActivateWallet(ctx, id);
   });
@@ -370,7 +358,6 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
     await handleSell(ctx, ca ?? "", pct ?? "100");
   });
 
-  // Live price tracker — refreshable, shows entry P&L + sell shortcuts
   bot.action(/^price:(.+)$/, async (ctx) => {
     const ca = (ctx.match as RegExpMatchArray)[1] ?? "";
     await handleLivePrice(ctx, ca);
@@ -381,66 +368,55 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
     const text = ctx.message.text.trim();
     const telegramId = ctx.from.id;
 
-    // Multi-step flow: wallet key import
     const importState = getPendingImport(telegramId);
     if (importState) {
       await processImportedKey(ctx, text);
       return;
     }
 
-    // Multi-step flow: wallet rename
     if (getPendingRename(telegramId)) {
       await processRenameInput(ctx, text);
       return;
     }
 
-    // Multi-step flow: copy-trade target
     if (isPendingCopyTradeAdd(telegramId)) {
       await processCopyTradeInput(ctx, text);
       return;
     }
 
-       // Multi-step flow: filter update
     const filterState = getPendingFilter(telegramId);
     if (filterState) {
       await processFilterInput(ctx, text);
       return;
     }
 
-    // Multi-step flow: manual snipe CA (validated against active chain)
     if (isPendingManualSnipe(telegramId)) {
       await processManualSnipeCA(ctx, text);
       return;
     }
 
-
-    // Multi-step flow: custom buy amount
     const customBuy = getPendingCustomBuy(telegramId);
     if (customBuy) {
       await processCustomBuyAmount(ctx, text);
       return;
     }
 
-    // CA detection
     const caType = detectCAType(text);
     if (caType) {
       await handleCAAnalysis(ctx, text);
       return;
     }
 
-    // Group scanner
     if (ctx.chat.type !== "private") {
       const user = await db.query.usersTable.findFirst({
         where: eq(usersTable.telegramId, telegramId),
       });
       if (user?.scannerActive) {
-        // Pass telegramId so scanner can DM the user in private, not reply in group
         await scanGroupMessage(text, user.id, telegramId, user.activeChain);
       }
       return;
     }
 
-    // Default: show menu
     await renderDashboard(ctx, false);
   });
 
@@ -458,16 +434,13 @@ export async function launchBot(bot: Telegraf<Context>): Promise<void> {
     logger.info("Webhook set — Express will handle updates");
   } else {
     logger.info("Launching bot with long-polling (no WEBHOOK_DOMAIN set)");
-    // Delete any existing webhook before polling
     await bot.telegram.deleteWebhook();
     void bot.launch({ dropPendingUpdates: true });
   }
 
-  // Register the command list so Telegram shows the "/" menu to users
   try {
     await bot.telegram.setMyCommands(BOT_COMMANDS);
-    logger.info("Bot commands registered with Telegram");
   } catch (err) {
-    logger.warn({ err }, "Failed to register bot commands — non-fatal");
+    logger.error({ err }, "Failed to set bot commands menu");
   }
 }
