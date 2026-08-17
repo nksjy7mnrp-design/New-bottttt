@@ -101,11 +101,20 @@ export async function handleWalletManager(ctx: Context): Promise<void> {
         );
 
   const chains = ["SOL", "ETH", "BASE", "BSC"];
-  const generateRow = chains.map((c) =>
-    Markup.button.callback(`➕ ${c}`, `gen_wallet:${c}`)
+  
+  // Split into pairs so the wider buttons fit perfectly on mobile screens
+  const generateRow1 = chains.slice(0, 2).map((c) =>
+    Markup.button.callback(`➕ Create ${c}`, `gen_wallet:${c}`)
   );
-  const importRow = chains.map((c) =>
-    Markup.button.callback(`📥 ${c}`, `import_wallet:${c}`)
+  const generateRow2 = chains.slice(2, 4).map((c) =>
+    Markup.button.callback(`➕ Create ${c}`, `gen_wallet:${c}`)
+  );
+
+  const importRow1 = chains.slice(0, 2).map((c) =>
+    Markup.button.callback(`📥 Import ${c}`, `import_wallet:${c}`)
+  );
+  const importRow2 = chains.slice(2, 4).map((c) =>
+    Markup.button.callback(`📥 Import ${c}`, `import_wallet:${c}`)
   );
 
   // One manage button per wallet (capped to keep the keyboard usable)
@@ -128,16 +137,18 @@ export async function handleWalletManager(ctx: Context): Promise<void> {
     `—`,
     `🔐 Keys stored encrypted (AES-256-GCM)`,
     ``,
-    `➕ = Generate new wallet   📥 = Import existing wallet`,
+    `➕ = Create new wallet   📥 = Import existing wallet`,
     `⚙️ = Manage wallet (rename / activate / export / delete)`,
     activeWallet
       ? `💳 = Deposit funds to your active ${chain} wallet`
-      : `⚠️ Generate or import a wallet to see deposit address`,
+      : `⚠️ Create or import a wallet to see deposit address`,
   ].join("\n");
 
   const keyboard = Markup.inlineKeyboard([
-    generateRow,
-    importRow,
+    generateRow1, // Create SOL | Create ETH
+    generateRow2, // Create BASE | Create BSC
+    importRow1,   // Import SOL | Import ETH
+    importRow2,   // Import BASE | Import BSC
     ...manageRows,
     ...depositRow,
     [Markup.button.callback("⬅️ Dashboard", "dashboard")],
@@ -145,7 +156,6 @@ export async function handleWalletManager(ctx: Context): Promise<void> {
 
   await sendOrEdit(ctx, text, { parse_mode: "HTML", ...keyboard });
 }
-
 // ── Deposit screen — shows full address + balance + instructions ─────────────
 export async function handleDeposit(ctx: Context, chain: string): Promise<void> {
   const telegramId = ctx.from?.id;
