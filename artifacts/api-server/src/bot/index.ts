@@ -18,6 +18,7 @@ import {
   handleGenerateWallet,
   handleImportWallet,
   handleImportMethodChoice,
+  handleImportPhraseMenu,
   processImportedKey,
   getPendingImport,
   handleWalletDetail,
@@ -179,6 +180,7 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   bot.action("filters",        handleFilters);
   bot.action("toggle_honeypot",handleToggleHoneypot);
   bot.action("toggle_buy_mode", handleToggleBuyMode);
+  bot.action("import_phrase_menu", handleImportPhraseMenu);
 
   bot.action("manual_snipe",   handleManualSnipePrompt);
 
