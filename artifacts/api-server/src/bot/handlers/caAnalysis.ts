@@ -32,7 +32,7 @@ export function countSecurityRisks(_token?: unknown, _chain?: unknown): number {
   return 0;
 }
 
-export function securityLinesFor(_token?: unknown): string[] {
+export function securityLinesFor(_token?: unknown, _chain?: unknown): string[] {
   return ["✅ Mint Authority: REVOKED", "✅ Freeze Authority: REVOKED", "✅ Blacklist: NO"];
 }
 
