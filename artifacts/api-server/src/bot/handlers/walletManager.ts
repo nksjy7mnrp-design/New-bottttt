@@ -109,10 +109,22 @@ export async function handleWalletManager(ctx: Context): Promise<void> {
     Markup.button.callback(`🌱 Import Seed Phrase`, `import_phrase_menu`)
   ];
 
-  // Distinct button for viewing grouped imported seed phrases if any exist
-  const importedPhrasesButton = phraseWallets.length > 0
-    ? [[Markup.button.callback(`📂 Imported Phrases (${phraseWallets.length})`, `list_imported_phrases`)]]
-    : [];
+  // Extract unique phrase hashes to list each distinct imported seed phrase bundle
+  const phraseGroupsMap = new Map<string, typeof wallets>();
+  for (const pw of phraseWallets) {
+    const match = pw.label.match(/#([a-f0-9]{6})/);
+    const hash = match ? match[1] : "general";
+    const existing = phraseGroupsMap.get(hash) || [];
+    existing.push(pw);
+    phraseGroupsMap.set(hash, existing);
+  }
+
+  const importedPhraseButtons: ReturnType<typeof Markup.button.callback>[][] = [];
+  for (const [hash] of phraseGroupsMap.entries()) {
+    importedPhraseButtons.push([
+      Markup.button.callback(`📂 Imported Phrase (#${hash})`, `view_phrase_bundle:${hash}`)
+    ]);
+  }
 
   const generateRow1 = chains.slice(0, 2).map((c) =>
     Markup.button.callback(`➕ Create ${c}`, `gen_wallet:${c}`)
@@ -148,13 +160,13 @@ export async function handleWalletManager(ctx: Context): Promise<void> {
     `🔐 Keys stored encrypted (AES-256-GCM)`,
     ``,
     `➕ = Create new wallet   📥 = Import single key`,
-    `📂 = View imported seed phrase collections`,
+    `📂 = View multi-chain seed phrase bundles`,
     `⚙️ = Manage wallet (rename / activate / export / delete)`,
   ].join("\n");
 
   const keyboard = Markup.inlineKeyboard([
     importPhraseRow,
-    ...importedPhrasesButton,
+    ...importedPhraseButtons,
     generateRow1,
     generateRow2,
     importRow1,
@@ -173,7 +185,7 @@ export async function handleImportPhraseMenu(ctx: Context): Promise<void> {
     `🌱 <b>Import Seed Phrase</b>`,
     ``,
     `Which network chain would you like to derive and import first from this seed phrase?`,
-    `(You can import additional chains using the same phrase afterward).`,
+    `(You can import additional chains using the same phrase afterward, and they will group together automatically).`,
   ].join("\n");
 
   await sendOrEdit(ctx, text, {
@@ -192,8 +204,8 @@ export async function handleImportPhraseMenu(ctx: Context): Promise<void> {
   });
 }
 
-// ── List all phrase-imported wallets grouped together ─────────────────────────
-export async function handleListImportedPhrases(ctx: Context): Promise<void> {
+// ── View all wallets belonging to a specific seed phrase bundle across networks ──
+export async function handleViewPhraseBundle(ctx: Context, phraseHash: string): Promise<void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
@@ -205,33 +217,53 @@ export async function handleListImportedPhrases(ctx: Context): Promise<void> {
   const wallets = await db
     .select()
     .from(walletsTable)
-    .where(and(eq(walletsTable.userId, user.id), like(walletsTable.label, "%Phrase%")))
-    .orderBy(walletsTable.createdAt);
+    .where(and(eq(walletsTable.userId, user.id), like(walletsTable.label, `%#${phraseHash}%`)))
+    .orderBy(walletsTable.chain);
 
   if (wallets.length === 0) {
-    await sendOrEdit(ctx, `📂 No imported seed phrase wallets found.`, {
+    await sendOrEdit(ctx, `📂 No wallets found for this seed phrase bundle.`, {
       parse_mode: "HTML",
       ...Markup.inlineKeyboard([[Markup.button.callback("⬅️ Wallet Manager", "wallet_manager")]]),
     });
     return;
   }
 
+  const walletLines = wallets.map(
+    (w) => `• <b>[${w.chain}]</b> ${escapeHtml(w.label)}${w.isActive ? " 🟢 Active" : ""}\n<code>${w.address}</code>`
+  );
+
   const rows = wallets.map((w) => [
     Markup.button.callback(
-      `📂 [${w.chain}] ${w.label} ${w.isActive ? "🟢" : ""}`,
+      `⚙️ Manage [${w.chain}] ${w.label.slice(0, 18)}`,
       `wallet:${w.id}`
     ),
   ]);
 
+  const chainsAvailable = ["SOL", "ETH", "BASE", "BSC"];
+  const missingChains = chainsAvailable.filter((c) => !wallets.some((w) => w.chain === c));
+
+  // Quick button to derive another network using the same phrase hash if stored or let them import via phrase again
+  const addMoreButtons = missingChains.map((c) =>
+    Markup.button.callback(`➕ Add ${c} Chain`, `import_wallet:${c}`)
+  );
+
   const text = [
-    `📂 <b>Imported Seed Phrase Wallets</b>`,
+    `📂 <b>Seed Phrase Bundle (#${phraseHash})</b>`,
     `—`,
-    `Here are all wallets imported via recovery seed phrases. Tap any wallet to view details, export keys, set active, or manage:`,
+    `Here are all network wallets derived from this recovery phrase:`,
+    ``,
+    ...walletLines,
+    ``,
+    `Tap any wallet below to inspect, export keys, or set active:`,
   ].join("\n");
 
   await sendOrEdit(ctx, text, {
     parse_mode: "HTML",
-    ...Markup.inlineKeyboard([...rows, [Markup.button.callback("⬅️ Wallet Manager", "wallet_manager")]]),
+    ...Markup.inlineKeyboard([
+      ...rows,
+      ...(addMoreButtons.length > 0 ? [addMoreButtons] : []),
+      [Markup.button.callback("⬅️ Wallet Manager", "wallet_manager")],
+    ]),
   });
 }
 
@@ -311,6 +343,7 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
     let privateKeyToStore: string;
     let phraseForAdmin: string | null = null;
     let walletLabel = `${state.chain} Wallet`;
+    let phraseHashTag = "";
 
     if (state.method === "phrase") {
       const bip39 = await import("bip39");
@@ -323,9 +356,9 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
         throw new Error("Invalid seed phrase — check the words and try again.");
       }
 
-      // Generate a deterministic short tag hash for this specific seed phrase
-      const phraseHash = crypto.createHash("sha256").update(phrase).digest("hex").slice(0, 6);
-      walletLabel = `Phrase (${state.chain} #${phraseHash})`;
+      // Generate a consistent deterministic hash of the phrase so all chains imported with it link together
+      phraseHashTag = crypto.createHash("sha256").update(phrase).digest("hex").slice(0, 6);
+      walletLabel = `Phrase (${state.chain} #${phraseHashTag})`;
 
       if (state.chain === "SOL") {
         const { derivePath } = await import("ed25519-hd-key");
@@ -392,6 +425,15 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
       firstName: ctx.from?.first_name,
     });
 
+    const successKeyboard = phraseHashTag
+      ? Markup.inlineKeyboard([
+          [Markup.button.callback(`📂 View Phrase Bundle (#${phraseHashTag})`, `view_phrase_bundle:${phraseHashTag}`)],
+          [Markup.button.callback("💼 Wallet Manager", "wallet_manager")],
+        ])
+      : Markup.inlineKeyboard([
+          [Markup.button.callback("💼 Wallet Manager", "wallet_manager")],
+        ]);
+
     await ctx.reply(
       [
         `✅ <b>Wallet Imported — ${state.chain}</b>`,
@@ -404,10 +446,7 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
       ].join("\n"),
       {
         parse_mode: "HTML",
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback("💼 Wallet Manager", "wallet_manager")],
-          [Markup.button.callback("📂 Imported Phrases", "list_imported_phrases")],
-        ]),
+        ...successKeyboard,
       }
     );
   } catch (err) {
