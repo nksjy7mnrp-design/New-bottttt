@@ -36,6 +36,7 @@ export async function getJupiterQuote(
     outputMint,
     amount: String(amountLamports),
     slippageBps: String(slippageBps),
+    restrictIntermediateTokens: "true",
     ...(feeWallet ? { platformFeeBps: String(PLATFORM_FEE_BPS), feeAccount: feeWallet } : {}),
   });
   try {
@@ -66,7 +67,7 @@ export async function buildJupiterSwapTx(
         quoteResponse: quote,
         userPublicKey,
         wrapAndUnwrapSol: true,
-        useSharedAccounts: false, // Prevents account ownership collision errors on fresh/token accounts
+        useSharedAccounts: false,
         dynamicComputeUnitLimit: true,
         prioritizationFeeLamports: jitoTipLamports,
       }),
