@@ -3,12 +3,30 @@
  * All swaps are pre-simulated via simulateTransaction before submission.
  */
 
+import { PublicKey } from "@solana/web3.js";
 import { logger } from "../lib/logger";
 
 const JUPITER_API_KEY = process.env["JUPITER_API_KEY"] ?? "";
 const JUPITER_BASE = JUPITER_API_KEY
   ? "https://api.jup.ag/swap/v1"
   : "https://lite-api.jup.ag/swap/v1";
+
+const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+
+export function getAssociatedTokenAddress(mintStr: string, ownerStr: string): string {
+  try {
+    const mint = new PublicKey(mintStr);
+    const owner = new PublicKey(ownerStr);
+    const [address] = PublicKey.findProgramAddressSync(
+      [owner.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), mint.toBuffer()],
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+    return address.toBase58();
+  } catch {
+    return "";
+  }
+}
 
 export interface JupiterQuote {
   inputMint: string;
@@ -47,43 +65,53 @@ export async function getJupiterQuote(
 export async function buildJupiterSwapTx(
   quote: JupiterQuote,
   userPublicKey: string,
+  outputMint?: string,
   jitoTipLamports = 5_000
 ): Promise<string> {
+  const payload: Record<string, unknown> = {
+    quoteResponse: quote,
+    userPublicKey,
+    wrapAndUnwrapSol: true,
+    dynamicComputeUnitLimit: true,
+    prioritizationFeeLamports: "auto",
+  };
+
+  // Explicitly calculate and pass destination token account for the user's wallet
+  if (outputMint && outputMint !== "So11111111111111111111111111111111111111112") {
+    const ata = getAssociatedTokenAddress(outputMint, userPublicKey);
+    if (ata) {
+      payload["destinationTokenAccount"] = ata;
+    }
+  }
+
   const res = await fetch(`${JUPITER_BASE}/swap`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...(JUPITER_API_KEY ? { "x-api-key": JUPITER_API_KEY } : {}),
     },
-    body: JSON.stringify({
-      quoteResponse: quote,
-      userPublicKey,
-      wrapAndUnwrapSol: true,
-      useSharedAccounts: false, // <-- THIS FIXES THE "OWNED BY Hp2BK..." ERROR
-      dynamicComputeUnitLimit: true,
-      prioritizationFeeLamports: "auto",
-    }),
+    body: JSON.stringify(payload),
     signal: AbortSignal.timeout(15_000),
   });
-  
+
   const bodyText = await res.text();
-  
+
   if (!res.ok) {
     let errorMsg = bodyText;
     try {
       const parsed = JSON.parse(bodyText);
       errorMsg = parsed.error || parsed.message || bodyText;
     } catch (e) {}
-    
+
     logger.warn({ status: res.status, errorMsg }, "Jupiter /swap build failed");
     throw new Error(`Jupiter Error: ${errorMsg}`);
   }
-  
+
   const data = JSON.parse(bodyText) as { swapTransaction?: string };
   if (!data.swapTransaction) {
     throw new Error("Jupiter Error: Empty transaction returned.");
   }
-  
+
   return data.swapTransaction;
 }
 
@@ -114,5 +142,4 @@ export async function simulateSolanaTx(
     return { success: false, error: String(e) };
   }
 }
-
 
