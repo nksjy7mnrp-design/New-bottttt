@@ -53,11 +53,11 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<string
     let tokenName = "Unknown";
     let tokenSymbol = "?";
     let priceUsd = "0";
-    let mcap = 0;
-    let liquidity = 0;
-    let vol24 = 0;
-    let buys24 = 0;
-    let sells24 = 0;
+    let mcap: number = 0;
+    let liquidity: number = 0;
+    let vol24: number = 0;
+    let buys24: number = 0;
+    let sells24: number = 0;
     let found = false;
 
     if (pair) {
@@ -76,7 +76,7 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<string
         found = true;
         tokenName = gecko.baseTokenName;
         tokenSymbol = gecko.baseTokenSymbol;
-        priceUsd = gecko.priceUsd ?? "0";
+        priceUsd = String(gecko.priceUsd ?? "0");
         mcap = Number(gecko.fdvUsd ?? 0);
         liquidity = Number(gecko.liquidityUsd ?? 0);
       } else if (detectCAType(ca) === "SOL") {
@@ -86,7 +86,7 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<string
           tokenName = pump.name;
           tokenSymbol = pump.symbol;
           const solPrice = await withTimeout(getNativeTokenPrice("SOL"), 3000, 150);
-          priceUsd = String(pump.priceNative * solPrice);
+          priceUsd = String((pump.priceNative ?? 0) * Number(solPrice));
         }
       }
     }
@@ -114,9 +114,15 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<string
     const priceNum = Number(priceUsd);
     const priceFormatted = priceNum >= 1 ? priceNum.toFixed(4) : priceNum.toFixed(8);
 
-    const mcapStr = (mcap / 1_000).toFixed(1);
-    const liqStr = (liquidity / 1_000).toFixed(1);
-    const volStr = (vol24 / 1_000).toFixed(1);
+    const mcapNum = Number(mcap || 0);
+    const liqNum = Number(liquidity || 0);
+    const volNum = Number(vol24 || 0);
+    const buysNum = Number(buys24 || 0);
+    const sellsNum = Number(sells24 || 0);
+
+    const mcapStr = (mcapNum / 1_000).toFixed(1);
+    const liqStr = (liqNum / 1_000).toFixed(1);
+    const volStr = (volNum / 1_000).toFixed(1);
 
     const cardLines = [
       `🪙 <b>${tokenName}</b> [${tokenSymbol}]`,
@@ -124,7 +130,7 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<string
       `—`,
       `💲 <b>Price:</b> $${priceFormatted}`,
       `📊 <b>MCap:</b> $${mcapStr}K | 💧 <b>Liquidity:</b> $${liqStr}K`,
-      `📈 <b>24h Vol:</b> $${volStr}K (Buys: ${buys24} | Sells: ${sells24})`,
+      `📈 <b>24h Vol:</b> $${volStr}K (Buys: ${buysNum} | Sells: ${sellsNum})`,
       `—`,
       `Pick a buy amount below 👇`,
     ];
