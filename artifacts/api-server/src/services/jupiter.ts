@@ -69,9 +69,9 @@ export async function buildJupiterSwapTx(
         quoteResponse: quote,
         userPublicKey,
         wrapAndUnwrapSol: true,
-        prioritizationFeeLamports: {
-          jitoTipLamports,
-        },
+        dynamicComputeUnitLimit: true,
+        // Pass prioritization fee as a flat number or correct jito object schema
+        prioritizationFeeLamports: jitoTipLamports,
       }),
       signal: AbortSignal.timeout(15_000),
     });
