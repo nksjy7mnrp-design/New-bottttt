@@ -35,14 +35,15 @@ export function securityLinesFor(_token?: unknown, _chain?: unknown): string[] {
   return ["✅ Mint Authority: REVOKED", "✅ Freeze Authority: REVOKED", "✅ Blacklist: NO"];
 }
 
-export async function handleCAAnalysis(ctx: Context, ca: string): Promise<string | void> {
+export async function handleCAAnalysis(ctx: Context, caInput: string): Promise<string | void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
+  const ca = String(caInput ?? "").trim();
   const user = await db.query.usersTable.findFirst({
     where: eq(usersTable.telegramId, telegramId),
   });
-  const activeChain = user?.activeChain ?? "SOL";
+  const activeChain = String(user?.activeChain ?? "SOL");
 
   const statusMsg = await ctx.reply(`🔍 <b>Analyzing Token</b>\n<code>${ca}</code>…`, { parse_mode: "HTML" }).catch(() => null);
 
@@ -53,18 +54,18 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<string
     let tokenName = "Unknown";
     let tokenSymbol = "?";
     let priceUsd = "0";
-    let mcap: number = 0;
-    let liquidity: number = 0;
-    let vol24: number = 0;
-    let buys24: number = 0;
-    let sells24: number = 0;
+    let mcap = 0;
+    let liquidity = 0;
+    let vol24 = 0;
+    let buys24 = 0;
+    let sells24 = 0;
     let found = false;
 
     if (pair) {
       found = true;
       tokenName = pair.baseToken.name ?? "Unknown";
       tokenSymbol = pair.baseToken.symbol ?? "?";
-      priceUsd = pair.priceUsd ?? "0";
+      priceUsd = String(pair.priceUsd ?? "0");
       mcap = Number(pair.fdv ?? 0);
       liquidity = Number(pair.liquidity?.usd ?? 0);
       vol24 = Number(pair.volume?.h24 ?? 0);
@@ -114,15 +115,9 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<string
     const priceNum = Number(priceUsd);
     const priceFormatted = priceNum >= 1 ? priceNum.toFixed(4) : priceNum.toFixed(8);
 
-    const mcapNum = Number(mcap || 0);
-    const liqNum = Number(liquidity || 0);
-    const volNum = Number(vol24 || 0);
-    const buysNum = Number(buys24 || 0);
-    const sellsNum = Number(sells24 || 0);
-
-    const mcapStr = (mcapNum / 1_000).toFixed(1);
-    const liqStr = (liqNum / 1_000).toFixed(1);
-    const volStr = (volNum / 1_000).toFixed(1);
+    const mcapStr = (Number(mcap) / 1_000).toFixed(1);
+    const liqStr = (Number(liquidity) / 1_000).toFixed(1);
+    const volStr = (Number(vol24) / 1_000).toFixed(1);
 
     const cardLines = [
       `🪙 <b>${tokenName}</b> [${tokenSymbol}]`,
@@ -130,7 +125,7 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<string
       `—`,
       `💲 <b>Price:</b> $${priceFormatted}`,
       `📊 <b>MCap:</b> $${mcapStr}K | 💧 <b>Liquidity:</b> $${liqStr}K`,
-      `📈 <b>24h Vol:</b> $${volStr}K (Buys: ${buysNum} | Sells: ${sellsNum})`,
+      `📈 <b>24h Vol:</b> $${volStr}K (Buys: ${Number(buys24)} | Sells: ${Number(sells24)})`,
       `—`,
       `Pick a buy amount below 👇`,
     ];
