@@ -14,7 +14,7 @@ import { eq } from "drizzle-orm";
 import { logger } from "../../lib/logger";
 
 export function detectCAType(text: string): "SOL" | "EVM" | null {
-  const trimmed = text.trim();
+  const trimmed = String(text ?? "").trim();
   if (/^0x[a-fA-F0-9]{40}$/.test(trimmed)) return "EVM";
   if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed)) return "SOL";
   return null;
@@ -35,7 +35,7 @@ export function securityLinesFor(_token?: unknown, _chain?: unknown): string[] {
   return ["✅ Mint Authority: REVOKED", "✅ Freeze Authority: REVOKED", "✅ Blacklist: NO"];
 }
 
-export async function handleCAAnalysis(ctx: Context, caInput: string): Promise<string | void> {
+export async function handleCAAnalysis(ctx: Context, caInput: unknown): Promise<string | void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
@@ -63,8 +63,8 @@ export async function handleCAAnalysis(ctx: Context, caInput: string): Promise<s
 
     if (pair) {
       found = true;
-      tokenName = pair.baseToken.name ?? "Unknown";
-      tokenSymbol = pair.baseToken.symbol ?? "?";
+      tokenName = String(pair.baseToken?.name ?? "Unknown");
+      tokenSymbol = String(pair.baseToken?.symbol ?? "?");
       priceUsd = String(pair.priceUsd ?? "0");
       mcap = Number(pair.fdv ?? 0);
       liquidity = Number(pair.liquidity?.usd ?? 0);
@@ -72,11 +72,12 @@ export async function handleCAAnalysis(ctx: Context, caInput: string): Promise<s
       buys24 = Number(pair.txns?.h24?.buys ?? 0);
       sells24 = Number(pair.txns?.h24?.sells ?? 0);
     } else {
-      const gecko = await withTimeout(searchGeckoToken(ca, activeChain), 5000, null);
+      // Explicitly string-cast both parameters to satisfy TypeScript completely
+      const gecko = await withTimeout(searchGeckoToken(String(ca), String(activeChain)), 5000, null);
       if (gecko) {
         found = true;
-        tokenName = gecko.baseTokenName;
-        tokenSymbol = gecko.baseTokenSymbol;
+        tokenName = String(gecko.baseTokenName ?? "Unknown");
+        tokenSymbol = String(gecko.baseTokenSymbol ?? "?");
         priceUsd = String(gecko.priceUsd ?? "0");
         mcap = Number(gecko.fdvUsd ?? 0);
         liquidity = Number(gecko.liquidityUsd ?? 0);
@@ -84,10 +85,10 @@ export async function handleCAAnalysis(ctx: Context, caInput: string): Promise<s
         const pump = await withTimeout(getPumpFunToken(ca), 5000, null);
         if (pump) {
           found = true;
-          tokenName = pump.name;
-          tokenSymbol = pump.symbol;
+          tokenName = String(pump.name ?? "Unknown");
+          tokenSymbol = String(pump.symbol ?? "?");
           const solPrice = await withTimeout(getNativeTokenPrice("SOL"), 3000, 150);
-          priceUsd = String((pump.priceNative ?? 0) * Number(solPrice));
+          priceUsd = String((Number(pump.priceNative) || 0) * Number(solPrice));
         }
       }
     }
