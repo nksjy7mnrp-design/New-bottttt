@@ -19,6 +19,7 @@ import {
   handleImportWallet,
   handleImportMethodChoice,
   handleImportPhraseMenu,
+  handleListImportedPhrases,
   processImportedKey,
   getPendingImport,
   handleWalletDetail,
@@ -161,8 +162,7 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   bot.command("filters",   async (ctx) => handleFilters(ctx));
   bot.command("help",      async (ctx) => handleHelpGuide(ctx));
 
-  // ── Callback Queries ────────────────────────────────────────────────────
-  bot.action("dashboard",      (ctx) => renderDashboard(ctx, true));
+  // ── Callback Queries ────────────────────────────────────────────────    bot.action("dashboard",      (ctx) => renderDashboard(ctx, true));
   bot.action("new_runners",    handleNewRunners);
   bot.action("trending",       handleTrending);
   bot.action("pumpfun",        handlePumpfun);
@@ -181,6 +181,7 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   bot.action("toggle_honeypot",handleToggleHoneypot);
   bot.action("toggle_buy_mode", handleToggleBuyMode);
   bot.action("import_phrase_menu", handleImportPhraseMenu);
+  bot.action("list_imported_phrases", handleListImportedPhrases);
 
   bot.action("manual_snipe",   handleManualSnipePrompt);
 
