@@ -69,10 +69,13 @@ export async function buildJupiterSwapTx(
         quoteResponse: quote,
         userPublicKey,
         wrapAndUnwrapSol: true,
-        prioritizationFeeLamports: { jitoTipLamports },
+        prioritizationFeeLamports: {
+          jitoTipLamports,
+        },
       }),
       signal: AbortSignal.timeout(15_000),
     });
+    
     const bodyText = await res.text();
     if (!res.ok) {
       logger.warn(
