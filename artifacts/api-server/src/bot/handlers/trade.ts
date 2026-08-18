@@ -1,10 +1,7 @@
 /**
  * Trade execution handler.
- * SOL: Jupiter V6 → simulate → Jito bundle (no platform fee)
+ * SOL: Jupiter V6 (Raydium/DEX) with PumpPortal fallback (Pump.fun bonding curves)
  * EVM: 1inch swap → eth_call simulate → direct/Flashbots
- *
- * Also exports triggerAutoSnipeBuy — used by the PumpFun listener for auto-sniping —
- * and handleLivePrice — the live price tracker with entry P&L.
  */
 
 import type { Context } from "telegraf";
@@ -35,7 +32,7 @@ import { registerPendingClearer } from "../../lib/pendingFlows";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const EVM_NATIVE = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
-const PLATFORM_FEE_BPS = 0; // No platform fee
+const PLATFORM_FEE_BPS = 0;
 
 // ── Pending custom buy state ──────────────────────────────────────────────
 const pendingCustomBuy = new Map<number, { ca: string }>();
@@ -81,7 +78,42 @@ export async function handleSell(ctx: Context, ca: string, percentStr: string): 
   await executeSell(ctx, ca, percent);
 }
 
-// ── Core SOL buy execution (shared between manual + auto-snipe) ───────────
+// ── PumpPortal fallback for Pump.fun bonding curves ─────────────────────
+
+async function buildPumpPortalTx(
+  publicKey: string,
+  action: "buy" | "sell",
+  mint: string,
+  amount: number,
+  slippagePct = 10
+): Promise<string | null> {
+  try {
+    const res = await fetch("https://pumpportal.fun/api/trade-local", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        publicKey,
+        action,
+        mint,
+        denominatedInSol: "true",
+        amount,
+        slippage: slippagePct,
+        priorityFee: 0.0005,
+        pool: "pump",
+      }),
+      signal: AbortSignal.timeout(12_000),
+    });
+
+    if (!res.ok) return null;
+    const arrayBuffer = await res.arrayBuffer();
+    return Buffer.from(arrayBuffer).toString("base64");
+  } catch (err) {
+    logger.warn({ err, mint }, "PumpPortal transaction build failed");
+    return null;
+  }
+}
+
+// ── Core SOL buy execution ──────────────────────────────────────────────
 
 interface SolBuyParams {
   walletAddress: string;
@@ -100,30 +132,52 @@ interface SolBuyResult {
 async function executeSolBuy(params: SolBuyParams): Promise<SolBuyResult> {
   const { encryptedPrivateKey, ca, lamports, slippageBps, jitoTipLamports } = params;
 
-  // Deriving Keypair first guarantees userPublicKey matches actual signer keypair
   const privateKey = decrypt(encryptedPrivateKey);
   const { Keypair, VersionedTransaction } = await import("@solana/web3.js");
   const bs58 = await import("bs58");
   const kp = Keypair.fromSecretKey(bs58.default.decode(privateKey));
-  const actualSignerPubKey = kp.publicKey.toBase58();
+  const signerPubKey = kp.publicKey.toBase58();
 
-  const quote = await getJupiterQuote(SOL_MINT, ca, lamports, slippageBps);
-  if (!quote) throw new Error("Jupiter quote failed — token may have no liquidity");
+  let swapTxBase64: string | null = null;
+  let isPumpPortal = false;
 
-  const swapTx = await buildJupiterSwapTx(quote, actualSignerPubKey, ca, jitoTipLamports);
+  // 1. Try Jupiter first
+  try {
+    const quote = await getJupiterQuote(SOL_MINT, ca, lamports, slippageBps);
+    if (quote) {
+      swapTxBase64 = await buildJupiterSwapTx(quote, signerPubKey, ca, jitoTipLamports);
+    }
+  } catch (jupErr) {
+    logger.info({ jupErr: String(jupErr), ca }, "Jupiter build failed — checking PumpPortal fallback");
+  }
 
-  const sim = await simulateSolanaTx(swapTx);
-  if (!sim.success) throw new Error(`Simulation failed: ${sim.error}`);
+  // 2. Fallback to PumpPortal if Jupiter fails or token is on Pump.fun bonding curve
+  if (!swapTxBase64) {
+    const amountSol = lamports / 1e9;
+    const slippagePct = Math.max(5, Math.min(50, slippageBps / 100));
+    swapTxBase64 = await buildPumpPortalTx(signerPubKey, "buy", ca, amountSol, slippagePct);
+    isPumpPortal = true;
+  }
 
-  const txBytes = Buffer.from(swapTx, "base64");
+  if (!swapTxBase64) {
+    throw new Error("Token has no active liquidity on Jupiter or Pump.fun bonding curve.");
+  }
+
+  // Simulate if Jupiter transaction
+  if (!isPumpPortal) {
+    const sim = await simulateSolanaTx(swapTxBase64);
+    if (!sim.success) throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const txBytes = Buffer.from(swapTxBase64, "base64");
   const vTx = VersionedTransaction.deserialize(txBytes);
   vTx.sign([kp]);
   const signedBase64 = Buffer.from(vTx.serialize()).toString("base64");
 
   const txHash = await sendJitoBundle([signedBase64]);
-  if (!txHash) throw new Error("Jito bundle rejected");
+  if (!txHash) throw new Error("Jito bundle rejected or transaction broadcast failed.");
 
-  return { txHash, outAmount: quote.outAmount };
+  return { txHash, outAmount: String(lamports) };
 }
 
 async function getSolBalanceLamports(address: string): Promise<number> {
@@ -179,7 +233,7 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
   }
 
   if (detectedType === "SOL") {
-    const lamportsNeeded = Math.round(amount * 1e9) + 10_000_000; // + ~0.01 SOL buffer for fees/rent
+    const lamportsNeeded = Math.round(amount * 1e9) + 10_000_000;
     const balanceLamports = await getSolBalanceLamports(wallet.address);
     if (balanceLamports < lamportsNeeded) {
       const haveSol = (balanceLamports / 1e9).toFixed(4);
@@ -253,7 +307,7 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
       const provider = new JsonRpcProvider(rpcUrl);
 
       const balanceWei = await provider.getBalance(wallet.address);
-      const neededWei = BigInt(amountWei) + BigInt(3_000_000_000_000_000); // + ~0.003 native for gas
+      const neededWei = BigInt(amountWei) + BigInt(3_000_000_000_000_000);
       if (balanceWei < neededWei) {
         const haveNative = (Number(balanceWei) / 1e18).toFixed(5);
         const needNative = (Number(neededWei) / 1e18).toFixed(5);
@@ -322,7 +376,7 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
   }
 }
 
-// ── Auto-snipe buy (no ctx — sends via bot.telegram) ─────────────────────
+// ── Auto-snipe buy ───────────────────────────────────────────────────────
 
 export interface AutoSnipeParams {
   dbUserId: number;
@@ -550,21 +604,28 @@ async function executeSell(ctx: Context, ca: string, percent: number): Promise<v
       const slippageBps = config?.slippageBps ?? 1000;
       const jitoTip = config?.jitoTipLamports ?? getJitoTipLamports();
 
-      const quote = await getJupiterQuote(ca, SOL_MINT, sellAmount, slippageBps);
-      if (!quote) throw new Error("Jupiter quote failed");
-
       const privateKey = decrypt(wallet.encryptedPrivateKey);
       const { Keypair, VersionedTransaction } = await import("@solana/web3.js");
       const bs58 = await import("bs58");
       const kp = Keypair.fromSecretKey(bs58.default.decode(privateKey));
       const actualSignerPubKey = kp.publicKey.toBase58();
 
-      const swapTx = await buildJupiterSwapTx(quote, actualSignerPubKey, SOL_MINT, jitoTip);
+      let swapTxBase64: string | null = null;
 
-      const sim = await simulateSolanaTx(swapTx);
-      if (!sim.success) throw new Error(`Simulation failed: ${sim.error}`);
+      try {
+        const quote = await getJupiterQuote(ca, SOL_MINT, sellAmount, slippageBps);
+        if (quote) {
+          swapTxBase64 = await buildJupiterSwapTx(quote, actualSignerPubKey, SOL_MINT, jitoTip);
+        }
+      } catch (e) {}
 
-      const txBytes = Buffer.from(swapTx, "base64");
+      if (!swapTxBase64) {
+        swapTxBase64 = await buildPumpPortalTx(actualSignerPubKey, "sell", ca, percent, 15);
+      }
+
+      if (!swapTxBase64) throw new Error("Unable to build sell transaction.");
+
+      const txBytes = Buffer.from(swapTxBase64, "base64");
       const vTx = VersionedTransaction.deserialize(txBytes);
       vTx.sign([kp]);
       const signedBase64 = Buffer.from(vTx.serialize()).toString("base64");
@@ -572,9 +633,8 @@ async function executeSell(ctx: Context, ca: string, percent: number): Promise<v
       txHash = await sendJitoBundle([signedBase64]);
       if (!txHash) throw new Error("Jito bundle rejected");
 
-      const solOut = parseFloat(quote.outAmount) / 1e9;
       await db.update(tradesTable)
-        .set({ status: "CONFIRMED", txHash, amountOut: String(solOut) })
+        .set({ status: "CONFIRMED", txHash, amountOut: `${percent}%` })
         .where(eq(tradesTable.id, trade!.id));
 
       if (percent === 100) {
