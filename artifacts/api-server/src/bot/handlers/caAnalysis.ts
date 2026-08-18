@@ -54,11 +54,11 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<string
     let tokenName = "Unknown";
     let tokenSymbol = "?";
     let priceUsd = "0";
-    let mcap = 0;
-    let liquidity = 0;
-    let vol24 = 0;
-    let buys24 = 0;
-    let sells24 = 0;
+    let mcap: number = 0;
+    let liquidity: number = 0;
+    let vol24: number = 0;
+    let buys24: number = 0;
+    let sells24: number = 0;
     let found = false;
 
     if (pair) {
@@ -120,8 +120,8 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<string
       `📍 CA: <code>${ca}</code>`,
       `—`,
       `💲 <b>Price:</b> $${priceFormatted}`,
-      `📊 <b>MCap:</b> $${(mcap / 1_000).toFixed(1)}K | 💧 <b>Liquidity:</b> $${(liquidity / 1_000).toFixed(1)}K`,
-      `📈 <b>24h Vol:</b> $${(vol24 / 1_000).toFixed(1)}K (Buys: ${buys24} | Sells: ${sells24})`,
+      `📊 <b>MCap:</b> $${(Number(mcap) / 1_000).toFixed(1)}K | 💧 <b>Liquidity:</b> $${(Number(liquidity) / 1_000).toFixed(1)}K`,
+      `📈 <b>24h Vol:</b> $${(Number(vol24) / 1_000).toFixed(1)}K (Buys: ${Number(buys24)} | Sells: ${Number(sells24)})`,
       `—`,
       `Pick a buy amount below 👇`,
     ];
