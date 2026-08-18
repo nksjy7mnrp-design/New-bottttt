@@ -51,37 +51,43 @@ export async function buildJupiterSwapTx(
   quote: JupiterQuote,
   userPublicKey: string,
   jitoTipLamports = 5_000
-): Promise<string | null> {
-  try {
-    const res = await fetch(`${JUPITER_BASE}/swap`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(JUPITER_API_KEY ? { "x-api-key": JUPITER_API_KEY } : {}),
-      },
-      body: JSON.stringify({
-        quoteResponse: quote,
-        userPublicKey,
-        wrapAndUnwrapSol: true,
-        dynamicComputeUnitLimit: true,
-        prioritizationFeeLamports: jitoTipLamports,
-      }),
-      signal: AbortSignal.timeout(15_000),
-    });
-    const bodyText = await res.text();
-    if (!res.ok) {
-      logger.warn(
-        { status: res.status, body: bodyText.slice(0, 500) },
-        "Jupiter /swap build failed — see body for the actual reason"
-      );
-      return null;
-    }
-    const data = JSON.parse(bodyText) as { swapTransaction?: string };
-    return data.swapTransaction ?? null;
-  } catch (err) {
-    logger.warn({ err }, "Jupiter /swap request failed");
-    return null;
+): Promise<string> { // <-- Changed to strictly return a string or throw an error
+  const res = await fetch(`${JUPITER_BASE}/swap`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(JUPITER_API_KEY ? { "x-api-key": JUPITER_API_KEY } : {}),
+    },
+    body: JSON.stringify({
+      quoteResponse: quote,
+      userPublicKey,
+      wrapAndUnwrapSol: true,
+      dynamicComputeUnitLimit: true,
+      prioritizationFeeLamports: "auto", // Let Jupiter handle priority fees, Jito handles the bundle tip
+    }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  
+  const bodyText = await res.text();
+  
+  // If Jupiter rejects it, we catch the EXACT error and throw it to Telegram
+  if (!res.ok) {
+    let errorMsg = bodyText;
+    try {
+      const parsed = JSON.parse(bodyText);
+      errorMsg = parsed.error || parsed.message || bodyText;
+    } catch (e) {}
+    
+    logger.warn({ status: res.status, errorMsg }, "Jupiter /swap build failed");
+    throw new Error(`Jupiter Error: ${errorMsg}`);
   }
+  
+  const data = JSON.parse(bodyText) as { swapTransaction?: string };
+  if (!data.swapTransaction) {
+    throw new Error("Jupiter Error: Empty transaction returned.");
+  }
+  
+  return data.swapTransaction;
 }
 
 export async function simulateSolanaTx(
@@ -112,3 +118,4 @@ export async function simulateSolanaTx(
     return { success: false, error: String(e) };
   }
 }
+
