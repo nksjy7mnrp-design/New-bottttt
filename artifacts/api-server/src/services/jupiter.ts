@@ -1,9 +1,8 @@
 /**
- * Jupiter Swap API — Solana token swaps with 1% platform fee (100 bps).
+ * Jupiter Swap API — Solana token swaps with platform fee support.
  * All swaps are pre-simulated via simulateTransaction before submission.
  *
- * NOTE: quote-api.jup.ag/v6 was retired (deprecated Oct 2025). Current paths
- * are under /swap/v1 — free tier via lite-api.jup.ag (no key), or
+ * Paths are under /swap/v1 — free tier via lite-api.jup.ag (no key), or
  * api.jup.ag with a free API key from portal.jup.ag for higher reliability.
  */
 
@@ -37,8 +36,6 @@ export async function getJupiterQuote(
     outputMint,
     amount: String(amountLamports),
     slippageBps: String(slippageBps),
-    // platformFeeBps requires a matching feeAccount — Jupiter rejects the
-    // swap build if one is sent without the other, so only send both or neither.
     ...(feeWallet ? { platformFeeBps: String(PLATFORM_FEE_BPS), feeAccount: feeWallet } : {}),
   });
   try {
@@ -69,12 +66,12 @@ export async function buildJupiterSwapTx(
         quoteResponse: quote,
         userPublicKey,
         wrapAndUnwrapSol: true,
-        useSharedAccounts: false, // <-- Forces exclusive account handling to prevent ownership mismatch errors
+        useSharedAccounts: false, // Prevents account ownership collision errors on fresh/token accounts
+        dynamicComputeUnitLimit: true,
         prioritizationFeeLamports: jitoTipLamports,
       }),
       signal: AbortSignal.timeout(15_000),
     });
-    
     const bodyText = await res.text();
     if (!res.ok) {
       logger.warn(
