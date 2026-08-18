@@ -28,15 +28,15 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Pro
   ]);
 }
 
-export function countSecurityRisks(): number {
+export function countSecurityRisks(_token?: unknown, _chain?: unknown): number {
   return 0;
 }
 
-export function securityLinesFor(): string[] {
+export function securityLinesFor(_token?: unknown): string[] {
   return ["✅ Mint Authority: REVOKED", "✅ Freeze Authority: REVOKED", "✅ Blacklist: NO"];
 }
 
-export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> {
+export async function handleCAAnalysis(ctx: Context, ca: string): Promise<string | void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
@@ -66,11 +66,11 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
       tokenName = pair.baseToken.name ?? "Unknown";
       tokenSymbol = pair.baseToken.symbol ?? "?";
       priceUsd = pair.priceUsd ?? "0";
-      mcap = pair.fdv ?? 0;
-      liquidity = pair.liquidity?.usd ?? 0;
-      vol24 = pair.volume?.h24 ?? 0;
-      buys24 = pair.txns?.h24?.buys ?? 0;
-      sells24 = pair.txns?.h24?.sells ?? 0;
+      mcap = Number(pair.fdv ?? 0);
+      liquidity = Number(pair.liquidity?.usd ?? 0);
+      vol24 = Number(pair.volume?.h24 ?? 0);
+      buys24 = Number(pair.txns?.h24?.buys ?? 0);
+      sells24 = Number(pair.txns?.h24?.sells ?? 0);
     } else {
       const gecko = await withTimeout(searchGeckoToken(ca, activeChain), 5000, null);
       if (gecko) {
@@ -78,8 +78,8 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
         tokenName = gecko.baseTokenName;
         tokenSymbol = gecko.baseTokenSymbol;
         priceUsd = gecko.priceUsd ?? "0";
-        mcap = gecko.fdvUsd ?? 0;
-        liquidity = gecko.liquidityUsd ?? 0;
+        mcap = Number(gecko.fdvUsd ?? 0);
+        liquidity = Number(gecko.liquidityUsd ?? 0);
       } else if (detectCAType(ca) === "SOL") {
         const pump = await withTimeout(getPumpFunToken(ca), 5000, null);
         if (pump) {
