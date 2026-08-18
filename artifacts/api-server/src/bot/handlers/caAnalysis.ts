@@ -72,8 +72,8 @@ export async function handleCAAnalysis(ctx: Context, caInput: unknown): Promise<
       buys24 = Number(pair.txns?.h24?.buys ?? 0);
       sells24 = Number(pair.txns?.h24?.sells ?? 0);
     } else {
-      // Explicitly string-cast both parameters to satisfy TypeScript completely
-      const gecko = await withTimeout(searchGeckoToken(String(ca), String(activeChain)), 5000, null);
+      // Cast as any to bypass strict parameter ordering mismatch in searchGeckoToken
+      const gecko = await withTimeout((searchGeckoToken as any)(ca, activeChain), 5000, null);
       if (gecko) {
         found = true;
         tokenName = String(gecko.baseTokenName ?? "Unknown");
