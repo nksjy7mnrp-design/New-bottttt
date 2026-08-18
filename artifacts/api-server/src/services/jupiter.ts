@@ -1,9 +1,6 @@
 /**
  * Jupiter Swap API — Solana token swaps.
  * All swaps are pre-simulated via simulateTransaction before submission.
- *
- * Paths are under /swap/v1 — free tier via lite-api.jup.ag (no key), or
- * api.jup.ag with a free API key from portal.jup.ag for higher reliability.
  */
 
 import { logger } from "../lib/logger";
@@ -51,7 +48,7 @@ export async function buildJupiterSwapTx(
   quote: JupiterQuote,
   userPublicKey: string,
   jitoTipLamports = 5_000
-): Promise<string> { // <-- Changed to strictly return a string or throw an error
+): Promise<string> {
   const res = await fetch(`${JUPITER_BASE}/swap`, {
     method: "POST",
     headers: {
@@ -62,15 +59,15 @@ export async function buildJupiterSwapTx(
       quoteResponse: quote,
       userPublicKey,
       wrapAndUnwrapSol: true,
+      useSharedAccounts: false, // <-- THIS FIXES THE "OWNED BY Hp2BK..." ERROR
       dynamicComputeUnitLimit: true,
-      prioritizationFeeLamports: "auto", // Let Jupiter handle priority fees, Jito handles the bundle tip
+      prioritizationFeeLamports: "auto",
     }),
     signal: AbortSignal.timeout(15_000),
   });
   
   const bodyText = await res.text();
   
-  // If Jupiter rejects it, we catch the EXACT error and throw it to Telegram
   if (!res.ok) {
     let errorMsg = bodyText;
     try {
@@ -93,8 +90,7 @@ export async function buildJupiterSwapTx(
 export async function simulateSolanaTx(
   serializedBase64: string
 ): Promise<{ success: boolean; error?: string }> {
-  const rpcUrl =
-    process.env["SOLANA_RPC_URL"] ?? "https://api.mainnet-beta.solana.com";
+  const rpcUrl = process.env["SOLANA_RPC_URL"] ?? "https://api.mainnet-beta.solana.com";
   try {
     const res = await fetch(rpcUrl, {
       method: "POST",
@@ -118,4 +114,5 @@ export async function simulateSolanaTx(
     return { success: false, error: String(e) };
   }
 }
+
 
