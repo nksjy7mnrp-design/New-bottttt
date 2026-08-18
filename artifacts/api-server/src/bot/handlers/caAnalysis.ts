@@ -72,8 +72,8 @@ export async function handleCAAnalysis(ctx: Context, caInput: unknown): Promise<
       buys24 = Number(pair.txns?.h24?.buys ?? 0);
       sells24 = Number(pair.txns?.h24?.sells ?? 0);
     } else {
-      // Cast as any to bypass strict parameter ordering mismatch in searchGeckoToken
-      const gecko = await withTimeout((searchGeckoToken as any)(ca, activeChain), 5000, null);
+      // Correct argument order: searchGeckoToken(chain, tokenAddress)
+      const gecko = await withTimeout(searchGeckoToken(activeChain, ca), 5000, null);
       if (gecko) {
         found = true;
         tokenName = String(gecko.baseTokenName ?? "Unknown");
