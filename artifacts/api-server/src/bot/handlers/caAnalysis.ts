@@ -20,7 +20,6 @@ export function detectCAType(text: string): "SOL" | "EVM" | null {
   return null;
 }
 
-// Helper to wrap any promise with a strict timeout
 async function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   return Promise.race([
     promise,
@@ -54,11 +53,11 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<string
     let tokenName = "Unknown";
     let tokenSymbol = "?";
     let priceUsd = "0";
-    let mcap: number = 0;
-    let liquidity: number = 0;
-    let vol24: number = 0;
-    let buys24: number = 0;
-    let sells24: number = 0;
+    let mcap = 0;
+    let liquidity = 0;
+    let vol24 = 0;
+    let buys24 = 0;
+    let sells24 = 0;
     let found = false;
 
     if (pair) {
@@ -112,16 +111,20 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<string
       return;
     }
 
-    const priceNum = parseFloat(priceUsd);
+    const priceNum = Number(priceUsd);
     const priceFormatted = priceNum >= 1 ? priceNum.toFixed(4) : priceNum.toFixed(8);
+
+    const mcapStr = (mcap / 1_000).toFixed(1);
+    const liqStr = (liquidity / 1_000).toFixed(1);
+    const volStr = (vol24 / 1_000).toFixed(1);
 
     const cardLines = [
       `🪙 <b>${tokenName}</b> [${tokenSymbol}]`,
       `📍 CA: <code>${ca}</code>`,
       `—`,
       `💲 <b>Price:</b> $${priceFormatted}`,
-      `📊 <b>MCap:</b> $${(Number(mcap) / 1_000).toFixed(1)}K | 💧 <b>Liquidity:</b> $${(Number(liquidity) / 1_000).toFixed(1)}K`,
-      `📈 <b>24h Vol:</b> $${(Number(vol24) / 1_000).toFixed(1)}K (Buys: ${Number(buys24)} | Sells: ${Number(sells24)})`,
+      `📊 <b>MCap:</b> $${mcapStr}K | 💧 <b>Liquidity:</b> $${liqStr}K`,
+      `📈 <b>24h Vol:</b> $${volStr}K (Buys: ${buys24} | Sells: ${sells24})`,
       `—`,
       `Pick a buy amount below 👇`,
     ];
