@@ -69,8 +69,7 @@ export async function buildJupiterSwapTx(
         quoteResponse: quote,
         userPublicKey,
         wrapAndUnwrapSol: true,
-        dynamicComputeUnitLimit: true,
-        // Pass prioritization fee as a flat number or correct jito object schema
+        useSharedAccounts: false, // <-- Forces exclusive account handling to prevent ownership mismatch errors
         prioritizationFeeLamports: jitoTipLamports,
       }),
       signal: AbortSignal.timeout(15_000),
