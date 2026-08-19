@@ -1,190 +1,203 @@
 /**
- * GeckoTerminal API integration for token metadata, pool search, and trending pools.
+ * GeckoTerminal public API (no key required)
+ * Used as fallback when DexScreener has no data for a token.
  */
 
+const GT_BASE = "https://api.geckoterminal.com/api/v2";
+
+const CHAIN_MAP: Record<string, string> = {
+  SOL: "solana",
+  ETH: "eth",
+  BASE: "base",
+  BSC: "bsc",
+};
+
 export interface GeckoPool {
-  network: string;
-  dexId: string;
-  address: string;
   name: string;
+  address: string;
   baseTokenAddress: string;
   baseTokenName: string;
   baseTokenSymbol: string;
   priceUsd: string;
-  fdvUsd: number;
-  liquidityUsd: number;
-  reserveUsd: number;
+  priceChange5m: number;
+  priceChange1h: number;
+  priceChange24h: number;
   volumeUsd24h: number;
+  liquidityUsd: number;
+  fdvUsd: number | null;
+  marketCapUsd: number | null;
+  network: string;
+  dexId: string;
   buys24h?: number;
   sells24h?: number;
-  marketCapUsd?: number;
-  poolCreatedAt?: number;
-  priceChange5m?: number;
-  priceChange1h?: number;
-  priceChange24h?: number;
+  poolCreatedAt?: number; // unix ms
 }
 
-export async function searchGeckoToken(networkOrCa: string, caOrNetwork?: string): Promise<GeckoPool | null> {
+interface GTPoolAttr {
+  name?: string;
+  base_token_price_usd?: string;
+  price_change_percentage?: { m5?: string; h1?: string; h24?: string };
+  volume_usd?: { h24?: string };
+  reserve_in_usd?: string;
+  fdv_usd?: string;
+  market_cap_usd?: string;
+  address?: string;
+  pool_created_at?: string;
+  transactions?: { h24?: { buys?: number; sells?: number } };
+}
+
+interface GTRelationships {
+  base_token?: { data?: { id?: string } };
+  dex?: { data?: { id?: string } };
+}
+
+function parsePool(
+  attr: GTPoolAttr,
+  rel: GTRelationships,
+  network: string
+): GeckoPool | null {
+  const baseParts = rel.base_token?.data?.id?.split("_") ?? [];
+  const baseTokenAddress = baseParts.slice(1).join("_") || "";
+  if (!attr.base_token_price_usd) return null;
+  return {
+    name: attr.name ?? "Unknown",
+    address: attr.address ?? "",
+    baseTokenAddress,
+    baseTokenName: (attr.name ?? "").split(" / ")[0] ?? "Unknown",
+    baseTokenSymbol: (attr.name ?? "").split(" / ")[0] ?? "?",
+    priceUsd: attr.base_token_price_usd,
+    priceChange5m: parseFloat(attr.price_change_percentage?.m5 ?? "0"),
+    priceChange1h: parseFloat(attr.price_change_percentage?.h1 ?? "0"),
+    priceChange24h: parseFloat(attr.price_change_percentage?.h24 ?? "0"),
+    volumeUsd24h: parseFloat(attr.volume_usd?.h24 ?? "0"),
+    liquidityUsd: parseFloat(attr.reserve_in_usd ?? "0"),
+    fdvUsd: attr.fdv_usd ? parseFloat(attr.fdv_usd) : null,
+    marketCapUsd: attr.market_cap_usd ? parseFloat(attr.market_cap_usd) : null,
+    network,
+    dexId: rel.dex?.data?.id ?? "unknown",
+    buys24h: attr.transactions?.h24?.buys,
+    sells24h: attr.transactions?.h24?.sells,
+    poolCreatedAt: attr.pool_created_at ? new Date(attr.pool_created_at).getTime() : undefined,
+  };
+}
+
+/** Search GeckoTerminal for pools matching a token address */
+export async function searchGeckoToken(
+  ca: string,
+  chain: string
+): Promise<GeckoPool | null> {
+  const network = CHAIN_MAP[chain] ?? "solana";
   try {
-    const isNetworkFirst = networkOrCa.length <= 10;
-    const network = isNetworkFirst ? networkOrCa.toLowerCase() : (caOrNetwork?.toLowerCase() ?? "solana");
-    const ca = isNetworkFirst ? (caOrNetwork ?? networkOrCa) : networkOrCa;
+    // Try by address first (most precise)
+    const res = await fetch(
+      `${GT_BASE}/networks/${network}/tokens/${ca}/pools?page=1`,
+      {
+        headers: { Accept: "application/json;version=20230302" },
+        signal: AbortSignal.timeout(10_000),
+      }
+    );
+    if (res.ok) {
+      const json = (await res.json()) as {
+        data?: Array<{ attributes?: GTPoolAttr; relationships?: GTRelationships }>;
+      };
+      const pools = json.data ?? [];
+      for (const p of pools) {
+        const pool = parsePool(p.attributes ?? {}, p.relationships ?? {}, network);
+        if (pool) return pool;
+      }
+    }
 
-    const netKey = network === "sol" || network === "solana" ? "solana" : network === "eth" ? "eth" : network === "base" ? "base" : "solana";
-    const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/${netKey}/tokens/${ca}/pools`, {
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(5000),
-    });
-
-    if (!res.ok) return null;
-    const data = (await res.json()) as {
-      data?: Array<{
-        id?: string;
-        attributes?: {
-          address?: string;
-          name?: string;
-          price_usd?: string;
-          fdv_usd?: string;
-          reserve_in_usd?: string;
-          volume_usd?: { h24?: string };
-          price_change_percentage?: { m5?: string; h1?: string; h24?: string };
-          pool_created_at?: string;
-        };
-        relationships?: {
-          base_token?: { data?: { id?: string } };
-        };
-      }>;
+    // Fallback: search endpoint
+    const res2 = await fetch(
+      `${GT_BASE}/search/pools?query=${encodeURIComponent(ca)}&network=${network}&page=1`,
+      {
+        headers: { Accept: "application/json;version=20230302" },
+        signal: AbortSignal.timeout(10_000),
+      }
+    );
+    if (!res2.ok) return null;
+    const json2 = (await res2.json()) as {
+      data?: Array<{ attributes?: GTPoolAttr; relationships?: GTRelationships }>;
     };
-
-    const pool = data.data?.[0];
-    if (!pool?.attributes) return null;
-
-    const fdv = Number(pool.attributes.fdv_usd ?? 0);
-    const reserve = Number(pool.attributes.reserve_in_usd ?? 0);
-    const createdAtStr = pool.attributes.pool_created_at;
-
-    // Extract actual token mint address from relationships if available
-    const rawBaseTokenId = pool.relationships?.base_token?.data?.id ?? "";
-    const extractedTokenCa = rawBaseTokenId.includes("_") ? rawBaseTokenId.split("_")[1] : ca;
-
-    return {
-      network: netKey,
-      dexId: "geckoterminal",
-      address: pool.attributes.address ?? "",
-      name: pool.attributes.name ?? "Unknown",
-      baseTokenAddress: extractedTokenCa || ca,
-      baseTokenName: pool.attributes.name?.split("/")?.[0]?.trim() ?? "Unknown",
-      baseTokenSymbol: pool.attributes.name?.split("/")?.[0]?.trim() ?? "?",
-      priceUsd: pool.attributes.price_usd ?? "0",
-      fdvUsd: fdv,
-      liquidityUsd: reserve,
-      reserveUsd: reserve,
-      volumeUsd24h: Number(pool.attributes.volume_usd?.h24 ?? 0),
-      buys24h: 0,
-      sells24h: 0,
-      marketCapUsd: fdv,
-      poolCreatedAt: createdAtStr ? new Date(createdAtStr).getTime() : undefined,
-      priceChange5m: Number(pool.attributes.price_change_percentage?.m5 ?? 0),
-      priceChange1h: Number(pool.attributes.price_change_percentage?.h1 ?? 0),
-      priceChange24h: Number(pool.attributes.price_change_percentage?.h24 ?? 0),
-    };
+    const pools2 = json2.data ?? [];
+    for (const p of pools2) {
+      const pool = parsePool(p.attributes ?? {}, p.relationships ?? {}, network);
+      if (pool) return pool;
+    }
+    return null;
   } catch {
     return null;
   }
 }
 
+/** Get top trending pools from GeckoTerminal (Solana) */
 export async function getGeckoTrending(network = "solana"): Promise<GeckoPool[]> {
   try {
-    const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/${network}/trending_pools?include=base_token`, {
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(6000),
-    });
-    if (!res.ok) return [];
-    const data = (await res.json()) as { data?: Array<any>; included?: Array<any> };
-
-    // Map token IDs to token addresses
-    const tokenAddressMap = new Map<string, string>();
-    (data.included ?? []).forEach((inc) => {
-      if (inc.type === "token" && inc.attributes?.address) {
-        tokenAddressMap.set(inc.id, inc.attributes.address);
+    const res = await fetch(
+      `${GT_BASE}/networks/${network}/trending_pools?page=1`,
+      {
+        headers: { Accept: "application/json;version=20230302" },
+        signal: AbortSignal.timeout(10_000),
       }
-    });
-
-    return (data.data ?? []).map((p) => {
-      const baseTokenRef = p.relationships?.base_token?.data?.id;
-      const baseTokenAddr = (baseTokenRef ? tokenAddressMap.get(baseTokenRef) : "") || p.attributes?.address || "";
-
-      return {
-        network,
-        dexId: p.relationships?.dex?.data?.id ?? "geckoterminal",
-        address: p.attributes?.address ?? "",
-        name: p.attributes?.name ?? "",
-        baseTokenAddress: baseTokenAddr,
-        baseTokenName: p.attributes?.name?.split("/")?.[0]?.trim() ?? "",
-        baseTokenSymbol: p.attributes?.name?.split("/")?.[0]?.trim() ?? "",
-        priceUsd: p.attributes?.price_usd ?? "0",
-        fdvUsd: Number(p.attributes?.fdv_usd ?? 0),
-        liquidityUsd: Number(p.attributes?.reserve_in_usd ?? 0),
-        reserveUsd: Number(p.attributes?.reserve_in_usd ?? 0),
-        volumeUsd24h: Number(p.attributes?.volume_usd?.h24 ?? 0),
-        marketCapUsd: Number(p.attributes?.fdv_usd ?? 0),
-        poolCreatedAt: p.attributes?.pool_created_at ? new Date(p.attributes.pool_created_at).getTime() : undefined,
-        priceChange5m: Number(p.attributes?.price_change_percentage?.m5 ?? 0),
-        priceChange1h: Number(p.attributes?.price_change_percentage?.h1 ?? 0),
-        priceChange24h: Number(p.attributes?.price_change_percentage?.h24 ?? 0),
-      };
-    });
+    );
+    if (!res.ok) return [];
+    const json = (await res.json()) as {
+      data?: Array<{ attributes?: GTPoolAttr; relationships?: GTRelationships }>;
+    };
+    const results: GeckoPool[] = [];
+    for (const p of (json.data ?? []).slice(0, 5)) {
+      const pool = parsePool(p.attributes ?? {}, p.relationships ?? {}, network);
+      if (pool) results.push(pool);
+    }
+    return results;
   } catch {
     return [];
   }
 }
 
+/** Get newest pools from GeckoTerminal (Solana) */
 export async function getGeckoNewPools(network = "solana"): Promise<GeckoPool[]> {
   try {
-    const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/${network}/new_pools?include=base_token`, {
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(6000),
-    });
-    if (!res.ok) return [];
-    const data = (await res.json()) as { data?: Array<any>; included?: Array<any> };
-
-    const tokenAddressMap = new Map<string, string>();
-    (data.included ?? []).forEach((inc) => {
-      if (inc.type === "token" && inc.attributes?.address) {
-        tokenAddressMap.set(inc.id, inc.attributes.address);
+    const res = await fetch(
+      `${GT_BASE}/networks/${network}/new_pools?page=1`,
+      {
+        headers: { Accept: "application/json;version=20230302" },
+        signal: AbortSignal.timeout(10_000),
       }
-    });
-
-    return (data.data ?? []).map((p) => {
-      const baseTokenRef = p.relationships?.base_token?.data?.id;
-      const baseTokenAddr = (baseTokenRef ? tokenAddressMap.get(baseTokenRef) : "") || p.attributes?.address || "";
-
-      return {
-        network,
-        dexId: "geckoterminal",
-        address: p.attributes?.address ?? "",
-        name: p.attributes?.name ?? "",
-        baseTokenAddress: baseTokenAddr,
-        baseTokenName: p.attributes?.name?.split("/")?.[0]?.trim() ?? "",
-        baseTokenSymbol: p.attributes?.name?.split("/")?.[0]?.trim() ?? "",
-        priceUsd: p.attributes?.price_usd ?? "0",
-        fdvUsd: Number(p.attributes?.fdv_usd ?? 0),
-        liquidityUsd: Number(p.attributes?.reserve_in_usd ?? 0),
-        reserveUsd: Number(p.attributes?.reserve_in_usd ?? 0),
-        volumeUsd24h: Number(p.attributes?.volume_usd?.h24 ?? 0),
-        marketCapUsd: Number(p.attributes?.fdv_usd ?? 0),
-        poolCreatedAt: p.attributes?.pool_created_at ? new Date(p.attributes.pool_created_at).getTime() : undefined,
-        priceChange5m: Number(p.attributes?.price_change_percentage?.m5 ?? 0),
-        priceChange1h: Number(p.attributes?.price_change_percentage?.h1 ?? 0),
-        priceChange24h: Number(p.attributes?.price_change_percentage?.h24 ?? 0),
-      };
-    });
+    );
+    if (!res.ok) return [];
+    const json = (await res.json()) as {
+      data?: Array<{ attributes?: GTPoolAttr; relationships?: GTRelationships }>;
+    };
+    const results: GeckoPool[] = [];
+    for (const p of (json.data ?? []).slice(0, 5)) {
+      const pool = parsePool(p.attributes ?? {}, p.relationships ?? {}, network);
+      if (pool) results.push(pool);
+    }
+    return results;
   } catch {
     return [];
   }
 }
 
-export function formatGeckoPool(pool: GeckoPool): string {
-  return `${pool.name} - $${pool.priceUsd}`;
+export function formatGeckoPool(p: GeckoPool): string {
+  const sign = (n: number) => (n >= 0 ? `+${n.toFixed(2)}` : n.toFixed(2));
+  const liq =
+    p.liquidityUsd > 0
+      ? `$${(p.liquidityUsd / 1_000).toFixed(1)}K`
+      : "N/A";
+  const mc =
+    p.marketCapUsd != null
+      ? `$${(p.marketCapUsd / 1_000_000).toFixed(2)}M`
+      : p.fdvUsd != null
+        ? `$${(p.fdvUsd / 1_000_000).toFixed(2)}M (FDV)`
+        : "N/A";
+  return [
+    `🦎 <b>${p.baseTokenName}</b>`,
+    `📍 CA: <code>${p.baseTokenAddress || p.address}</code>`,
+    `💲 Price: <b>$${Number(p.priceUsd).toFixed(8)}</b>`,
+    `📊 5m: ${sign(p.priceChange5m)}% | 1h: ${sign(p.priceChange1h)}% | 24h: ${sign(p.priceChange24h)}%`,
+    `🏦 MCap: ${mc} | 💧 Liq: ${liq}`,
+    `🔗 DEX: ${p.dexId} on ${p.network}`,
+  ].join("\n");
 }
-
