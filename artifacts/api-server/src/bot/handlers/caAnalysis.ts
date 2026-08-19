@@ -9,8 +9,9 @@ import { getPairsByToken } from "../../services/dexscreener";
 import { searchGeckoToken } from "../../services/geckoTerminal";
 import { getPumpFunToken } from "../../services/pumpfunApi";
 import { getNativeTokenPrice } from "../../services/chainPrice";
-import { db, usersTable } from "@workspace/db";
+import { db } from "@workspace/db";
 import { eq } from "drizzle-orm";
+import { usersTable } from "@workspace/db";
 import { logger } from "../../lib/logger";
 
 export function detectCAType(text: string): "SOL" | "EVM" | null {
@@ -72,7 +73,6 @@ export async function handleCAAnalysis(ctx: Context, caInput: unknown): Promise<
       buys24 = Number(pair.txns?.h24?.buys ?? 0);
       sells24 = Number(pair.txns?.h24?.sells ?? 0);
     } else {
-      // Correct argument order: searchGeckoToken(chain, tokenAddress)
       const gecko = await withTimeout(searchGeckoToken(activeChain, ca), 5000, null);
       if (gecko) {
         found = true;
