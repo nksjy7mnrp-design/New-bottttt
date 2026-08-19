@@ -1,6 +1,5 @@
 /**
  * CA Analysis Handler — instant token lookup & security checks.
- * Wrapped with strict 5s timeouts per service to prevent bot handler freezes.
  */
 
 import type { Context } from "telegraf";
@@ -18,13 +17,6 @@ export function detectCAType(text: string): "SOL" | "EVM" | null {
   if (/^0x[a-fA-F0-9]{40}$/.test(trimmed)) return "EVM";
   if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed)) return "SOL";
   return null;
-}
-
-async function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
-  ]);
 }
 
 export function countSecurityRisks(_token?: unknown, _chain?: unknown): number {
@@ -48,7 +40,7 @@ export async function handleCAAnalysis(ctx: Context, caInput: unknown): Promise<
   const statusMsg = await ctx.reply(`🔍 <b>Analyzing Token</b>\n<code>${ca}</code>…`, { parse_mode: "HTML" }).catch(() => null);
 
   try {
-    const pairs = await withTimeout(getPairsByToken(ca), 5000, []);
+    const pairs = await getPairsByToken(ca).catch(() => []);
     const pair = pairs[0];
 
     let tokenName = "Unknown";
@@ -72,8 +64,7 @@ export async function handleCAAnalysis(ctx: Context, caInput: unknown): Promise<
       buys24 = Number(pair.txns?.h24?.buys ?? 0);
       sells24 = Number(pair.txns?.h24?.sells ?? 0);
     } else {
-      // Correct order matching searchGeckoToken signature (ca, network)
-      const gecko = await withTimeout(searchGeckoToken(ca, activeChain), 5000, null);
+      const gecko = await searchGeckoToken(ca, activeChain).catch(() => null);
       if (gecko) {
         found = true;
         tokenName = String(gecko.baseTokenName ?? "Unknown");
@@ -82,12 +73,12 @@ export async function handleCAAnalysis(ctx: Context, caInput: unknown): Promise<
         mcap = Number(gecko.fdvUsd ?? 0);
         liquidity = Number(gecko.liquidityUsd ?? 0);
       } else if (detectCAType(ca) === "SOL") {
-        const pump = await withTimeout(getPumpFunToken(ca), 5000, null);
+        const pump = await getPumpFunToken(ca).catch(() => null);
         if (pump) {
           found = true;
           tokenName = String(pump.name ?? "Unknown");
           tokenSymbol = String(pump.symbol ?? "?");
-          const solPrice = await withTimeout(getNativeTokenPrice("SOL"), 3000, 150);
+          const solPrice = await getNativeTokenPrice("SOL").catch(() => 150);
           priceUsd = String((Number(pump.priceNative) || 0) * Number(solPrice));
         }
       }
@@ -174,4 +165,5 @@ export async function handleRugCheckCallback(ctx: Context, ca: string): Promise<
     parse_mode: "HTML",
   });
 }
+
 
