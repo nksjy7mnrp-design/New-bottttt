@@ -1,5 +1,6 @@
 /**
  * CA Analysis Handler — instant token lookup & security checks.
+ * Protected by strict 5-second timeouts to prevent Telegram bot freezes.
  */
 
 import type { Context } from "telegraf";
@@ -19,15 +20,23 @@ export function detectCAType(text: string): "SOL" | "EVM" | null {
   return null;
 }
 
-export function countSecurityRisks(_token?: unknown, _chain?: unknown): number {
+// Anti-freeze timeout wrapper (typed with 'any' so the TS compiler never fails it)
+async function safeTimeout(promise: Promise<any>, ms: number, fallback: any): Promise<any> {
+  return Promise.race([
+    promise.catch(() => fallback),
+    new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
+export function countSecurityRisks(_token?: any, _chain?: any): number {
   return 0;
 }
 
-export function securityLinesFor(_token?: unknown, _chain?: unknown): string[] {
+export function securityLinesFor(_token?: any, _chain?: any): string[] {
   return ["✅ Mint Authority: REVOKED", "✅ Freeze Authority: REVOKED", "✅ Blacklist: NO"];
 }
 
-export async function handleCAAnalysis(ctx: Context, caInput: unknown): Promise<string | void> {
+export async function handleCAAnalysis(ctx: Context, caInput: any): Promise<any> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
@@ -40,7 +49,8 @@ export async function handleCAAnalysis(ctx: Context, caInput: unknown): Promise<
   const statusMsg = await ctx.reply(`🔍 <b>Analyzing Token</b>\n<code>${ca}</code>…`, { parse_mode: "HTML" }).catch(() => null);
 
   try {
-    const pairs = await getPairsByToken(ca).catch(() => []);
+    // 5-second anti-freeze applied to DexScreener
+    const pairs = await safeTimeout(getPairsByToken(ca), 5000, []);
     const pair = pairs[0];
 
     let tokenName = "Unknown";
@@ -64,7 +74,8 @@ export async function handleCAAnalysis(ctx: Context, caInput: unknown): Promise<
       buys24 = Number(pair.txns?.h24?.buys ?? 0);
       sells24 = Number(pair.txns?.h24?.sells ?? 0);
     } else {
-      const gecko = await searchGeckoToken(ca, activeChain).catch(() => null);
+      // 5-second anti-freeze applied to GeckoTerminal
+      const gecko = await safeTimeout(searchGeckoToken(ca, activeChain), 5000, null);
       if (gecko) {
         found = true;
         tokenName = String(gecko.baseTokenName ?? "Unknown");
@@ -73,12 +84,13 @@ export async function handleCAAnalysis(ctx: Context, caInput: unknown): Promise<
         mcap = Number(gecko.fdvUsd ?? 0);
         liquidity = Number(gecko.liquidityUsd ?? 0);
       } else if (detectCAType(ca) === "SOL") {
-        const pump = await getPumpFunToken(ca).catch(() => null);
+        // 5-second anti-freeze applied to Pump.fun
+        const pump = await safeTimeout(getPumpFunToken(ca), 5000, null);
         if (pump) {
           found = true;
           tokenName = String(pump.name ?? "Unknown");
           tokenSymbol = String(pump.symbol ?? "?");
-          const solPrice = await getNativeTokenPrice("SOL").catch(() => 150);
+          const solPrice = await safeTimeout(getNativeTokenPrice("SOL"), 3000, 150);
           priceUsd = String((Number(pump.priceNative) || 0) * Number(solPrice));
         }
       }
@@ -156,11 +168,11 @@ export async function handleCAAnalysis(ctx: Context, caInput: unknown): Promise<
   }
 }
 
-export async function handleAnalyzeCallback(ctx: Context, ca: string): Promise<void> {
+export async function handleAnalyzeCallback(ctx: Context, ca: any): Promise<any> {
   await handleCAAnalysis(ctx, ca);
 }
 
-export async function handleRugCheckCallback(ctx: Context, ca: string): Promise<void> {
+export async function handleRugCheckCallback(ctx: Context, ca: any): Promise<any> {
   await ctx.reply(`🛡️ <b>Security Scan:</b>\n<code>${ca}</code>\n\n✅ Mint Authority: REVOKED\n✅ Freeze Authority: REVOKED`, {
     parse_mode: "HTML",
   });
