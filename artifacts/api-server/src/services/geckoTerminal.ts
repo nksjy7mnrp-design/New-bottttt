@@ -75,7 +75,7 @@ export async function searchGeckoToken(networkOrCa: string, caOrNetwork?: string
       buys24h: 0,
       sells24h: 0,
       marketCapUsd: fdv,
-      poolCreatedAt: pool.attributes.pool_created_at,
+      poolCreatedAt: pool.attributes.pool_created_at ? String(pool.attributes.pool_created_at) : undefined,
       priceChange5m: Number(pool.attributes.price_change_percentage?.m5 ?? 0),
       priceChange1h: Number(pool.attributes.price_change_percentage?.h1 ?? 0),
       priceChange24h: Number(pool.attributes.price_change_percentage?.h24 ?? 0),
@@ -107,6 +107,7 @@ export async function getGeckoTrending(network = "solana"): Promise<GeckoPool[]>
       reserveUsd: Number(p.attributes?.reserve_in_usd ?? 0),
       volumeUsd24h: Number(p.attributes?.volume_usd?.h24 ?? 0),
       marketCapUsd: Number(p.attributes?.fdv_usd ?? 0),
+      poolCreatedAt: p.attributes?.pool_created_at ? String(p.attributes.pool_created_at) : undefined,
     }));
   } catch {
     return [];
@@ -135,6 +136,7 @@ export async function getGeckoNewPools(network = "solana"): Promise<GeckoPool[]>
       reserveUsd: Number(p.attributes?.reserve_in_usd ?? 0),
       volumeUsd24h: Number(p.attributes?.volume_usd?.h24 ?? 0),
       marketCapUsd: Number(p.attributes?.fdv_usd ?? 0),
+      poolCreatedAt: p.attributes?.pool_created_at ? String(p.attributes.pool_created_at) : undefined,
     }));
   } catch {
     return [];
