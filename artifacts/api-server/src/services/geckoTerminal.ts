@@ -18,7 +18,7 @@ export interface GeckoPool {
   buys24h?: number;
   sells24h?: number;
   marketCapUsd?: number;
-  poolCreatedAt?: string;
+  poolCreatedAt?: number;
   priceChange5m?: number;
   priceChange1h?: number;
   priceChange24h?: number;
@@ -58,6 +58,7 @@ export async function searchGeckoToken(networkOrCa: string, caOrNetwork?: string
 
     const fdv = Number(pool.attributes.fdv_usd ?? 0);
     const reserve = Number(pool.attributes.reserve_in_usd ?? 0);
+    const createdAtStr = pool.attributes.pool_created_at;
 
     return {
       network: netKey,
@@ -75,7 +76,7 @@ export async function searchGeckoToken(networkOrCa: string, caOrNetwork?: string
       buys24h: 0,
       sells24h: 0,
       marketCapUsd: fdv,
-      poolCreatedAt: pool.attributes.pool_created_at ? String(pool.attributes.pool_created_at) : undefined,
+      poolCreatedAt: createdAtStr ? new Date(createdAtStr).getTime() : undefined,
       priceChange5m: Number(pool.attributes.price_change_percentage?.m5 ?? 0),
       priceChange1h: Number(pool.attributes.price_change_percentage?.h1 ?? 0),
       priceChange24h: Number(pool.attributes.price_change_percentage?.h24 ?? 0),
@@ -107,7 +108,7 @@ export async function getGeckoTrending(network = "solana"): Promise<GeckoPool[]>
       reserveUsd: Number(p.attributes?.reserve_in_usd ?? 0),
       volumeUsd24h: Number(p.attributes?.volume_usd?.h24 ?? 0),
       marketCapUsd: Number(p.attributes?.fdv_usd ?? 0),
-      poolCreatedAt: p.attributes?.pool_created_at ? String(p.attributes.pool_created_at) : undefined,
+      poolCreatedAt: p.attributes?.pool_created_at ? new Date(p.attributes.pool_created_at).getTime() : undefined,
     }));
   } catch {
     return [];
@@ -136,7 +137,7 @@ export async function getGeckoNewPools(network = "solana"): Promise<GeckoPool[]>
       reserveUsd: Number(p.attributes?.reserve_in_usd ?? 0),
       volumeUsd24h: Number(p.attributes?.volume_usd?.h24 ?? 0),
       marketCapUsd: Number(p.attributes?.fdv_usd ?? 0),
-      poolCreatedAt: p.attributes?.pool_created_at ? String(p.attributes.pool_created_at) : undefined,
+      poolCreatedAt: p.attributes?.pool_created_at ? new Date(p.attributes.pool_created_at).getTime() : undefined,
     }));
   } catch {
     return [];
@@ -146,4 +147,5 @@ export async function getGeckoNewPools(network = "solana"): Promise<GeckoPool[]>
 export function formatGeckoPool(pool: GeckoPool): string {
   return `${pool.name} - $${pool.priceUsd}`;
 }
+
 
