@@ -1,6 +1,7 @@
 /**
  * Trade execution handler.
- * SOL: Jupiter V6 (Raydium/DEX) with PumpPortal fallback (Pump.fun bonding curves)
+ * SOL: Jupiter (DEX/AMM aggregator) with PumpPortal fallback, pool="auto"
+ *      (Pump.fun bonding curve, PumpSwap post-graduation, or Raydium)
  * EVM: 1inch swap → eth_call simulate → direct/Flashbots
  */
 
@@ -78,39 +79,64 @@ export async function handleSell(ctx: Context, ca: string, percentStr: string): 
   await executeSell(ctx, ca, percent);
 }
 
-// ── PumpPortal fallback for Pump.fun bonding curves ─────────────────────
+// ── PumpPortal fallback for Pump.fun tokens (bonding curve OR PumpSwap) ──
 
 async function buildPumpPortalTx(
   publicKey: string,
   action: "buy" | "sell",
   mint: string,
-  amount: number,
+  amount: number | string,
+  denominatedInSol: boolean,
   slippagePct = 10
-): Promise<string | null> {
+): Promise<string> {
+  let res: Response;
   try {
-    const res = await fetch("https://pumpportal.fun/api/trade-local", {
+    res = await fetch("https://pumpportal.fun/api/trade-local", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         publicKey,
         action,
         mint,
-        denominatedInSol: "true",
+        denominatedInSol: denominatedInSol ? "true" : "false",
         amount,
         slippage: slippagePct,
         priorityFee: 0.0005,
-        pool: "pump",
+        // "auto" lets PumpPortal detect where the liquidity actually lives:
+        // the original bonding curve ("pump"), PumpSwap after the token
+        // graduates ("pump-amm", the default destination since PumpSwap
+        // launched in March 2025), or Raydium. Hardcoding "pump" here was
+        // the root cause of most buy/sell failures: any token that had
+        // already graduated has no bonding curve left to trade against, so
+        // PumpPortal had nothing to build and this always came back empty —
+        // right as Jupiter's route can *also* still be missing if the
+        // migration is too fresh to be indexed yet, tripping both fallbacks
+        // at once.
+        pool: "auto",
       }),
       signal: AbortSignal.timeout(12_000),
     });
-
-    if (!res.ok) return null;
-    const arrayBuffer = await res.arrayBuffer();
-    return Buffer.from(arrayBuffer).toString("base64");
   } catch (err) {
-    logger.warn({ err, mint }, "PumpPortal transaction build failed");
-    return null;
+    throw new Error(`PumpPortal request failed (network/timeout): ${String(err)}`);
   }
+
+  if (!res.ok) {
+    const bodyText = await res.text().catch(() => "");
+    let errorMsg = bodyText;
+    try {
+      const parsed = JSON.parse(bodyText);
+      errorMsg = parsed.error || parsed.message || bodyText;
+    } catch {
+      // response wasn't JSON — use the raw text as-is
+    }
+    logger.warn({ status: res.status, errorMsg, mint }, "PumpPortal transaction build failed");
+    throw new Error(`PumpPortal ${res.status}: ${(errorMsg || "request failed").slice(0, 150)}`);
+  }
+
+  const arrayBuffer = await res.arrayBuffer();
+  const base64 = Buffer.from(arrayBuffer).toString("base64");
+  if (!base64) throw new Error("PumpPortal returned an empty transaction");
+  return base64;
 }
 
 // ── Core SOL buy execution ──────────────────────────────────────────────
@@ -140,27 +166,38 @@ async function executeSolBuy(params: SolBuyParams): Promise<SolBuyResult> {
 
   let swapTxBase64: string | null = null;
   let isPumpPortal = false;
+  let jupiterFailReason = "";
+  let pumpPortalFailReason = "";
 
-  // 1. Try Jupiter first
+  // 1. Try Jupiter first (covers anything with real DEX/AMM liquidity,
+  //    including graduated Pump.fun tokens now trading on PumpSwap/Raydium)
   try {
     const quote = await getJupiterQuote(SOL_MINT, ca, lamports, slippageBps);
-    if (quote) {
-      swapTxBase64 = await buildJupiterSwapTx(quote, signerPubKey, ca, jitoTipLamports);
-    }
+    swapTxBase64 = await buildJupiterSwapTx(quote, signerPubKey, ca, jitoTipLamports);
   } catch (jupErr) {
-    logger.info({ jupErr: String(jupErr), ca }, "Jupiter build failed — checking PumpPortal fallback");
+    jupiterFailReason = jupErr instanceof Error ? jupErr.message : String(jupErr);
+    logger.info({ jupErr: jupiterFailReason, ca }, "Jupiter build failed — checking PumpPortal fallback");
   }
 
-  // 2. Fallback to PumpPortal if Jupiter fails or token is on Pump.fun bonding curve
+  // 2. Fallback to PumpPortal — pool "auto" covers the bonding curve,
+  //    PumpSwap, and Raydium, so this now also catches tokens Jupiter
+  //    hasn't indexed yet.
   if (!swapTxBase64) {
     const amountSol = lamports / 1e9;
     const slippagePct = Math.max(5, Math.min(50, slippageBps / 100));
-    swapTxBase64 = await buildPumpPortalTx(signerPubKey, "buy", ca, amountSol, slippagePct);
-    isPumpPortal = true;
+    try {
+      swapTxBase64 = await buildPumpPortalTx(signerPubKey, "buy", ca, amountSol, true, slippagePct);
+      isPumpPortal = true;
+    } catch (ppErr) {
+      pumpPortalFailReason = ppErr instanceof Error ? ppErr.message : String(ppErr);
+      logger.warn({ ppErr: pumpPortalFailReason, ca }, "PumpPortal fallback failed");
+    }
   }
 
   if (!swapTxBase64) {
-    throw new Error("Token has no active liquidity on Jupiter or Pump.fun bonding curve.");
+    throw new Error(
+      `No route found on Jupiter or Pump.fun.\nJupiter: ${jupiterFailReason || "no route"}\nPumpPortal: ${pumpPortalFailReason || "no route"}`
+    );
   }
 
   // Simulate if Jupiter transaction
@@ -611,19 +648,37 @@ async function executeSell(ctx: Context, ca: string, percent: number): Promise<v
       const actualSignerPubKey = kp.publicKey.toBase58();
 
       let swapTxBase64: string | null = null;
+      let jupiterFailReason = "";
+      let pumpPortalFailReason = "";
 
       try {
         const quote = await getJupiterQuote(ca, SOL_MINT, sellAmount, slippageBps);
-        if (quote) {
-          swapTxBase64 = await buildJupiterSwapTx(quote, actualSignerPubKey, SOL_MINT, jitoTip);
-        }
-      } catch (e) {}
-
-      if (!swapTxBase64) {
-        swapTxBase64 = await buildPumpPortalTx(actualSignerPubKey, "sell", ca, percent, 15);
+        swapTxBase64 = await buildJupiterSwapTx(quote, actualSignerPubKey, SOL_MINT, jitoTip);
+      } catch (jupErr) {
+        jupiterFailReason = jupErr instanceof Error ? jupErr.message : String(jupErr);
+        logger.info({ jupErr: jupiterFailReason, ca }, "Jupiter sell build failed — checking PumpPortal fallback");
       }
 
-      if (!swapTxBase64) throw new Error("Unable to build sell transaction.");
+      if (!swapTxBase64) {
+        try {
+          // Sell by percentage of current holdings: PumpPortal accepts "N%"
+          // as amount with denominatedInSol=false. The previous code passed
+          // the raw percent (e.g. 100) with denominatedInSol hardcoded
+          // "true", which told PumpPortal to sell 100 SOL *worth* of the
+          // token instead of 100% of the position — pool "auto" also
+          // applies here so it finds the token wherever it now trades.
+          swapTxBase64 = await buildPumpPortalTx(actualSignerPubKey, "sell", ca, `${percent}%`, false, 15);
+        } catch (ppErr) {
+          pumpPortalFailReason = ppErr instanceof Error ? ppErr.message : String(ppErr);
+          logger.warn({ ppErr: pumpPortalFailReason, ca }, "PumpPortal sell fallback failed");
+        }
+      }
+
+      if (!swapTxBase64) {
+        throw new Error(
+          `No route found on Jupiter or Pump.fun.\nJupiter: ${jupiterFailReason || "no route"}\nPumpPortal: ${pumpPortalFailReason || "no route"}`
+        );
+      }
 
       const txBytes = Buffer.from(swapTxBase64, "base64");
       const vTx = VersionedTransaction.deserialize(txBytes);
