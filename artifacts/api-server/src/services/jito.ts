@@ -16,9 +16,20 @@ export function getJitoTipLamports(): number {
 export async function sendJitoBundle(
   serializedBase64Txs: string[]
 ): Promise<string | null> {
+  // Jito does not run a bundle-accepting endpoint at the bare
+  // "mainnet.block-engine.jito.wtf" host — only the regional subdomains
+  // below are documented as operational for sendBundle. The bare host was
+  // returning a 404 on every single request, which is why every buy was
+  // failing at this step regardless of the token. Set JITO_BLOCK_ENGINE_URL
+  // to whichever region is physically closest to your Railway deployment
+  // for the best landing odds; any of the four will work correctly.
+  //   https://amsterdam.mainnet.block-engine.jito.wtf
+  //   https://frankfurt.mainnet.block-engine.jito.wtf
+  //   https://ny.mainnet.block-engine.jito.wtf
+  //   https://tokyo.mainnet.block-engine.jito.wtf
   const jitoUrl =
     process.env["JITO_BLOCK_ENGINE_URL"] ??
-    "https://mainnet.block-engine.jito.wtf";
+    "https://ny.mainnet.block-engine.jito.wtf";
   try {
     const res = await fetch(`${jitoUrl}/api/v1/bundles`, {
       method: "POST",
@@ -27,7 +38,7 @@ export async function sendJitoBundle(
         jsonrpc: "2.0",
         id: 1,
         method: "sendBundle",
-        params: [serializedBase64Txs],
+        params: [serializedBase64Txs, { encoding: "base64" }],
       }),
       signal: AbortSignal.timeout(20_000),
     });
