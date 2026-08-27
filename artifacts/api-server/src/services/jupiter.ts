@@ -3,30 +3,12 @@
  * All swaps are pre-simulated via simulateTransaction before submission.
  */
 
-import { PublicKey } from "@solana/web3.js";
 import { logger } from "../lib/logger";
 
 const JUPITER_API_KEY = process.env["JUPITER_API_KEY"] ?? "";
 const JUPITER_BASE = JUPITER_API_KEY
   ? "https://api.jup.ag/swap/v1"
   : "https://lite-api.jup.ag/swap/v1";
-
-const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
-const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
-
-export function getAssociatedTokenAddress(mintStr: string, ownerStr: string): string {
-  try {
-    const mint = new PublicKey(mintStr);
-    const owner = new PublicKey(ownerStr);
-    const [address] = PublicKey.findProgramAddressSync(
-      [owner.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), mint.toBuffer()],
-      ASSOCIATED_TOKEN_PROGRAM_ID
-    );
-    return address.toBase58();
-  } catch {
-    return "";
-  }
-}
 
 export interface JupiterQuote {
   inputMint: string;
@@ -91,21 +73,23 @@ export async function buildJupiterSwapTx(
   outputMint?: string,
   jitoTipLamports = 5_000
 ): Promise<string> {
+  // NOTE: outputMint is accepted for logging/context but no longer used to
+  // override the destination account — Jupiter derives and creates that
+  // itself, correctly, for both legacy SPL Token and Token-2022 mints.
+  void outputMint;
+
   const payload: Record<string, unknown> = {
     quoteResponse: quote,
     userPublicKey,
     wrapAndUnwrapSol: true,
     dynamicComputeUnitLimit: true,
-    prioritizationFeeLamports: "auto",
+    // Object form (not the "auto" string) tells Jupiter to embed an actual
+    // transfer to one of Jito's tip accounts in the built transaction. A
+    // plain compute-budget priority fee (what "auto" gives you) does NOT
+    // satisfy Jito — sendBundle requires a real tip-account transfer, so
+    // every Jupiter-built tx was being rejected once it reached Jito.
+    prioritizationFeeLamports: { jitoTipLamports },
   };
-
-  // Explicitly calculate and pass destination token account for the user's wallet
-  if (outputMint && outputMint !== "So11111111111111111111111111111111111111112") {
-    const ata = getAssociatedTokenAddress(outputMint, userPublicKey);
-    if (ata) {
-      payload["destinationTokenAccount"] = ata;
-    }
-  }
 
   const res = await fetch(`${JUPITER_BASE}/swap`, {
     method: "POST",
