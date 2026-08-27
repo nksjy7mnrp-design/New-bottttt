@@ -43,22 +43,45 @@ export async function getJupiterQuote(
   outputMint: string,
   amountLamports: number,
   slippageBps = 1000
-): Promise<JupiterQuote | null> {
+): Promise<JupiterQuote> {
   const params = new URLSearchParams({
     inputMint,
     outputMint,
     amount: String(amountLamports),
     slippageBps: String(slippageBps),
   });
+
+  let res: Response;
   try {
-    const res = await fetch(`${JUPITER_BASE}/quote?${params.toString()}`, {
+    res = await fetch(`${JUPITER_BASE}/quote?${params.toString()}`, {
       headers: JUPITER_API_KEY ? { "x-api-key": JUPITER_API_KEY } : {},
       signal: AbortSignal.timeout(15_000),
     });
-    if (!res.ok) return null;
-    return (await res.json()) as JupiterQuote;
+  } catch (err) {
+    // Network error / timeout — distinguish from "no route" so callers know
+    // this wasn't a liquidity problem at all.
+    throw new Error(`Jupiter quote request failed (network/timeout): ${String(err)}`);
+  }
+
+  const bodyText = await res.text();
+  if (!res.ok) {
+    let errorMsg = bodyText;
+    try {
+      const parsed = JSON.parse(bodyText);
+      errorMsg = parsed.error || parsed.message || bodyText;
+    } catch {
+      // response wasn't JSON — use the raw text as-is
+    }
+    // A 4xx here (most commonly 400 "no route found") is exactly what happens
+    // for a token with zero indexed DEX liquidity — expected for very fresh
+    // Pump.fun bonding-curve tokens, and the trigger for the PumpPortal fallback.
+    throw new Error(`Jupiter quote ${res.status}: ${(errorMsg || "no route found").slice(0, 150)}`);
+  }
+
+  try {
+    return JSON.parse(bodyText) as JupiterQuote;
   } catch {
-    return null;
+    throw new Error("Jupiter quote returned an unparseable response");
   }
 }
 
