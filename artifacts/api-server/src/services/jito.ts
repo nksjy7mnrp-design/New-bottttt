@@ -61,6 +61,8 @@ export async function sendSolanaTxDirect(signedBase64Tx: string): Promise<string
     return null;
   }
 }
+
+export async function sendJitoBundle(
   serializedBase64Txs: string[]
 ): Promise<string | null> {
   // Jito does not run a bundle-accepting endpoint at the bare
