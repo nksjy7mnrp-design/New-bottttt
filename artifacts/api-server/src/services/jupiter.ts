@@ -73,22 +73,19 @@ export async function buildJupiterSwapTx(
   outputMint?: string,
   jitoTipLamports = 5_000
 ): Promise<string> {
-  // NOTE: outputMint is accepted for logging/context but no longer used to
-  // override the destination account — Jupiter derives and creates that
-  // itself, correctly, for both legacy SPL Token and Token-2022 mints.
+  // outputMint/jitoTipLamports are no longer used here — the bot broadcasts
+  // directly via RPC now (see services/jito.ts: sendSolanaTxDirect), not via
+  // Jito bundles, so a standard "auto" priority fee is what actually helps
+  // landing speed. Kept as parameters for call-site compatibility.
   void outputMint;
+  void jitoTipLamports;
 
   const payload: Record<string, unknown> = {
     quoteResponse: quote,
     userPublicKey,
     wrapAndUnwrapSol: true,
     dynamicComputeUnitLimit: true,
-    // Object form (not the "auto" string) tells Jupiter to embed an actual
-    // transfer to one of Jito's tip accounts in the built transaction. A
-    // plain compute-budget priority fee (what "auto" gives you) does NOT
-    // satisfy Jito — sendBundle requires a real tip-account transfer, so
-    // every Jupiter-built tx was being rejected once it reached Jito.
-    prioritizationFeeLamports: { jitoTipLamports },
+    prioritizationFeeLamports: "auto",
   };
 
   const res = await fetch(`${JUPITER_BASE}/swap`, {
