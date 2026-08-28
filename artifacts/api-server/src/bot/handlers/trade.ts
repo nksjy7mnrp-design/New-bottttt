@@ -19,7 +19,7 @@ import { eq, and, desc } from "drizzle-orm";
 import { decrypt } from "../../lib/encryption";
 import { getBotRef } from "../../lib/botRef";
 import { getJupiterQuote, buildJupiterSwapTx, simulateSolanaTx } from "../../services/jupiter";
-import { sendJitoBundle, getJitoTipLamports } from "../../services/jito";
+import { sendSolanaTxDirect, getJitoTipLamports } from "../../services/jito";
 import { get1inchSwap } from "../../services/evmSwap";
 import { simulateEvmTx } from "../../services/flashbots";
 import { getPairsByToken } from "../../services/dexscreener";
@@ -211,8 +211,8 @@ async function executeSolBuy(params: SolBuyParams): Promise<SolBuyResult> {
   vTx.sign([kp]);
   const signedBase64 = Buffer.from(vTx.serialize()).toString("base64");
 
-  const txHash = await sendJitoBundle([signedBase64]);
-  if (!txHash) throw new Error("Jito bundle rejected or transaction broadcast failed.");
+  const txHash = await sendSolanaTxDirect(signedBase64);
+  if (!txHash) throw new Error("Transaction broadcast failed.");
 
   return { txHash, outAmount: String(lamports) };
 }
@@ -685,8 +685,8 @@ async function executeSell(ctx: Context, ca: string, percent: number): Promise<v
       vTx.sign([kp]);
       const signedBase64 = Buffer.from(vTx.serialize()).toString("base64");
 
-      txHash = await sendJitoBundle([signedBase64]);
-      if (!txHash) throw new Error("Jito bundle rejected");
+      txHash = await sendSolanaTxDirect(signedBase64);
+      if (!txHash) throw new Error("Transaction broadcast failed.");
 
       await db.update(tradesTable)
         .set({ status: "CONFIRMED", txHash, amountOut: `${percent}%` })
