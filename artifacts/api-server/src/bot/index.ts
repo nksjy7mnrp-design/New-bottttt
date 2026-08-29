@@ -10,7 +10,7 @@ import { logger } from "../lib/logger";
 import { renderDashboard } from "./dashboard";
 import { handleNewRunners } from "./handlers/newRunners";
 import { handleTrending } from "./handlers/trending";
-import { handlePumpfun, handlePumpfunStop } from "./handlers/pumpfun";
+import { handlePumpfun, handlePumpfunStart, handlePumpfunStop } from "./handlers/pumpfun";
 import { handlePreviousSignals } from "./handlers/previousSignals";
 import {
   handleWalletManager,
@@ -167,6 +167,7 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   bot.action("new_runners",    handleNewRunners);
   bot.action("trending",       handleTrending);
   bot.action("pumpfun",        handlePumpfun);
+  bot.action("pumpfun_start",  handlePumpfunStart);
   bot.action("pumpfun_stop",   handlePumpfunStop);
   bot.action("prev_signals",   handlePreviousSignals);
   bot.action("wallet_manager", handleWalletManager);
