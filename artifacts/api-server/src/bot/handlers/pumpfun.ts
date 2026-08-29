@@ -152,13 +152,26 @@ export function startPumpfunListener(dbUserId: number, telegramId: number, chatI
           Math.min(Math.max(Number.isFinite(rawAutoBuy) ? rawAutoBuy : 0.1, 0.000001), 1000).toFixed(6)
         );
 
-        // ── Alert user with analyze + quick buy buttons ─────────────────
-        await queueMessage(chatId, tokenMsg, "HTML", [
-          [
-            { text: "📊 Analyze", callback_data: `analyze:${mint}` },
-            { text: "💰 Quick Buy", callback_data: `buy:${mint}:${quickBuyAmount}` },
-          ],
-        ]);
+        // ── Auto-snipe — ALWAYS re-read the live DB flag, never a value
+        //    captured when the listener started, so toggling Auto-Snipe
+        //    on/off elsewhere takes effect on the very next token. ───────
+        const freshUser = await db.query.usersTable.findFirst({
+          where: eq(usersTable.id, dbUserId),
+        });
+
+        // Only broadcast the manual "New Token!" browse alert when
+        // Auto-Snipe is OFF. With Auto-Snipe on, the bot is already
+        // deciding whether to buy — sending this too just doubles every
+        // single launch into a second, redundant message and is the main
+        // source of the flood/429s.
+        if (!freshUser?.autoSnipe) {
+          await queueMessage(chatId, tokenMsg, "HTML", [
+            [
+              { text: "📊 Analyze", callback_data: `analyze:${mint}` },
+              { text: "💰 Quick Buy", callback_data: `buy:${mint}:${quickBuyAmount}` },
+            ],
+          ]);
+        }
 
         // ── Record signal ────────────────────────────────────────────────
         void db.insert(signalsTable).values({
@@ -170,12 +183,6 @@ export function startPumpfunListener(dbUserId: number, telegramId: number, chatI
           priceUsd,
         }).catch(() => undefined);
 
-        // ── Auto-snipe — ALWAYS re-read the live DB flag, never a value
-        //    captured when the listener started, so toggling Auto-Snipe
-        //    on/off elsewhere takes effect on the very next token. ───────
-        const freshUser = await db.query.usersTable.findFirst({
-          where: eq(usersTable.id, dbUserId),
-        });
         if (!freshUser?.autoSnipe) return;
 
         const freshConfig = await db.query.sniperConfigsTable.findFirst({
@@ -184,11 +191,9 @@ export function startPumpfunListener(dbUserId: number, telegramId: number, chatI
 
         const minLiq = parseFloat(freshConfig?.minLiquidityUsd ?? "0");
         if (minLiq > 0 && liquidityUsd < minLiq) {
-          await queueMessage(
-            telegramId,
-            `⏭ <b>Auto-Snipe Skipped</b> — ${symbolSafe}\n💧 Liquidity $${(liquidityUsd / 1_000).toFixed(1)}K < minimum $${(minLiq / 1_000).toFixed(1)}K`,
-            "HTML"
-          );
+          // Silent skip, no message — every token is at $0 liquidity at the
+          // instant it's created, so this condition is true for nearly
+          // every single launch. Notifying on it is pure noise, not signal.
           return;
         }
 
@@ -255,12 +260,12 @@ export function startPumpfunListener(dbUserId: number, telegramId: number, chatI
 }
 
 /**
- * Opens the PumpFun screen — this is now idempotent: it always ensures the
- * listener is running and just reports status, it never stops anything.
- * Previously this single action both started AND stopped the listener
- * depending on current state, which meant simply re-opening this menu
- * (e.g. navigating Dashboard → PumpFun again) would silently kill a
- * running listener. Stopping now requires the explicit Stop button below.
+/**
+ * Opens the PumpFun screen. This no longer starts anything on its own —
+ * it only reports current status. The listener starts exclusively when the
+ * user explicitly presses "▶️ Start Listener" (handlePumpfunStart below),
+ * so simply navigating here (or back here) never silently kicks off the
+ * live feed.
  */
 export async function handlePumpfun(ctx: Context): Promise<void> {
   const telegramId = ctx.from?.id;
@@ -302,8 +307,7 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
     }
   }
 
-  const chatId = ctx.chat?.id ?? telegramId;
-  startPumpfunListener(user.id, telegramId, chatId); // no-op if already running
+  const isActive = isPumpfunListenerActive(user.id);
 
   const autoSnipeStatus = autoSnipe
     ? `⚡ <b>Auto-Snipe: ON</b> — will auto-buy matching launches${balanceWarning}`
@@ -314,15 +318,20 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
     [
       `🌱 <b>PumpFun / Moonshot Snipe</b>`,
       ``,
-      `🟢 Listener <b>active</b> — watching new Solana token launches.`,
-      `You'll receive an alert with buy buttons for every new mint.`,
+      isActive
+        ? `🟢 Listener <b>active</b> — watching new Solana token launches.\nYou'll receive an alert with buy buttons for every new mint.`
+        : `🔴 Listener <b>stopped</b>.\nTap ▶️ Start Listener below to begin watching new launches.`,
       ``,
       autoSnipeStatus,
     ].join("\n"),
     {
       parse_mode: "HTML",
       ...Markup.inlineKeyboard([
-        [Markup.button.callback("⏹ Stop Listener", "pumpfun_stop")],
+        [
+          isActive
+            ? Markup.button.callback("⏹ Stop Listener", "pumpfun_stop")
+            : Markup.button.callback("▶️ Start Listener", "pumpfun_start"),
+        ],
         [
           Markup.button.callback("🤖 Auto-Snipe Settings", "auto_snipe"),
           Markup.button.callback("⚗️ Filters", "filters"),
@@ -331,6 +340,23 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
       ]),
     }
   );
+}
+
+/**
+ * Explicit start — only reachable via the "▶️ Start Listener" button.
+ */
+export async function handlePumpfunStart(ctx: Context): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const user = await db.query.usersTable.findFirst({
+    where: eq(usersTable.telegramId, telegramId),
+  });
+  if (!user) { await ctx.reply("❌ User not found. Send /start first."); return; }
+
+  const chatId = ctx.chat?.id ?? telegramId;
+  startPumpfunListener(user.id, telegramId, chatId); // no-op if already running
+  await handlePumpfun(ctx); // re-render with the now-active status
 }
 
 /**
