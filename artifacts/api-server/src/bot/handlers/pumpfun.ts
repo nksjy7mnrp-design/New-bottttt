@@ -61,12 +61,19 @@ export function stopPumpfunListener(dbUserId: number): void {
 export function startPumpfunListener(dbUserId: number, telegramId: number, chatId: number): void {
   if (activeListeners.has(dbUserId)) return; // already running
 
+  // Pump.fun can create many tokens per minute — processing every single one
+  // (DexScreener + GeckoTerminal + CoinGecko + RPC lookups, per token) is what
+  // was exhausting those services' rate limits and making balance/price show
+  // as 0. This drops events that arrive faster than one every 2.5s, before
+  // any lookup happens, so the actual call volume stays bounded no matter
+  // how fast new tokens are being minted network-wide.
+  let lastProcessedAt = 0;
+  const MIN_EVENT_INTERVAL_MS = 2_500;
+
   const ws = new WsManager(
     PUMPFUN_WSS,
         async (raw) => {
       try {
-        logger.info({ preview: raw.slice(0, 200) }, "PumpFun WS message received");
-
         const data = JSON.parse(raw) as {
           txType?: string;
           mint?: string;
@@ -77,6 +84,12 @@ export function startPumpfunListener(dbUserId: number, telegramId: number, chatI
         };
 
         if (data.txType !== "create" || !data.mint) return;
+
+        const now = Date.now();
+        if (now - lastProcessedAt < MIN_EVENT_INTERVAL_MS) return; // dropped, not queued
+        lastProcessedAt = now;
+
+        logger.info({ preview: raw.slice(0, 200) }, "PumpFun WS message received");
 
         const mint = data.mint;
         // Raw values for DB + trade params; escaped values for HTML rendering
