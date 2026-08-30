@@ -22,6 +22,25 @@ interface SendMessageJob {
 let queue: Queue<SendMessageJob> | null = null;
 let botRef: Telegraf<Context> | null = null;
 
+// Paces the no-Redis fallback path to under 1 message/second — Telegram's
+// own retry_after values (seen escalating from 500ms up to 4000ms in
+// production logs) confirmed the previous 350ms pacing still exceeded its
+// real per-chat limit under sustained traffic. Without this, a burst of
+// calls sends them all essentially at once and trips Telegram's 429.
+const DIRECT_SEND_INTERVAL_MS = 1_100;
+let lastDirectSendAt = 0;
+let directSendChain: Promise<void> = Promise.resolve();
+
+function scheduleDirectSend(fn: () => Promise<void>): Promise<void> {
+  directSendChain = directSendChain.then(async () => {
+    const wait = Math.max(0, lastDirectSendAt + DIRECT_SEND_INTERVAL_MS - Date.now());
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    lastDirectSendAt = Date.now();
+    await fn();
+  });
+  return directSendChain;
+}
+
 export function initMessageQueue(
   bot: Telegraf<Context>,
   redis: IORedis | null
@@ -77,10 +96,12 @@ export async function queueMessage(
     return;
   }
 
-  // Fallback: direct send
-  try {
-    await botRef?.telegram.sendMessage(chatId, text, extra);
-  } catch (err) {
-    logger.error({ chatId, err }, "Direct message send failed");
-  }
+  // Fallback: direct send, paced to avoid Telegram rate limits
+  await scheduleDirectSend(async () => {
+    try {
+      await botRef?.telegram.sendMessage(chatId, text, extra);
+    } catch (err) {
+      logger.error({ chatId, err }, "Direct message send failed");
+    }
+  });
 }
