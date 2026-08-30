@@ -11,21 +11,30 @@ const EVM_RPC_ENV: Record<string, string> = {
   BSC: "BSC_RPC_URL",
 };
 
+const priceCache = new Map<string, { value: string; expiresAt: number }>();
+const PRICE_CACHE_MS = 30_000;
+
 export async function getNativeTokenPrice(chain: string): Promise<string> {
   const coinId = COINGECKO_IDS[chain] ?? "solana";
+
+  const cached = priceCache.get(coinId);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
   try {
     const res = await fetch(
       `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd`,
       { signal: AbortSignal.timeout(8_000) }
     );
-    if (!res.ok) return "0.00";
+    if (!res.ok) return cached?.value ?? "0.00"; // serve stale cache over a hard "0.00" if we have one
     const data = (await res.json()) as Record<string, { usd?: number }>;
-    return (data[coinId]?.usd ?? 0).toLocaleString("en-US", {
+    const value = (data[coinId]?.usd ?? 0).toLocaleString("en-US", {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     });
+    priceCache.set(coinId, { value, expiresAt: Date.now() + PRICE_CACHE_MS });
+    return value;
   } catch {
-    return "0.00";
+    return cached?.value ?? "0.00";
   }
 }
 
