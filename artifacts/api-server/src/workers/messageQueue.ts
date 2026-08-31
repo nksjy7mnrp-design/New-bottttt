@@ -31,6 +31,34 @@ const DIRECT_SEND_INTERVAL_MS = 1_100;
 let lastDirectSendAt = 0;
 let directSendChain: Promise<void> = Promise.resolve();
 
+// Telegram can issue long punitive blocks on a specific chat (seen: a
+// single 429 with retry_after = 33299 — over 9 hours) after sustained
+// violations. No amount of pacing on our end lifts that early; it must be
+// respected and waited out. Without this, callers like the pending-snipe
+// queue (which checks every minute) would keep hammering the same blocked
+// chat for hours, uselessly failing every time and adding log noise. This
+// tracks each chat's block expiry and skips sends to it entirely until
+// then, trying again automatically once the block clears on its own.
+const blockedChatsUntil = new Map<string, number>();
+
+function isChatBlocked(chatId: number | string): boolean {
+  const until = blockedChatsUntil.get(String(chatId));
+  return typeof until === "number" && until > Date.now();
+}
+
+function recordBlockIfPresent(chatId: number | string, err: unknown): void {
+  const retryAfter = (err as { response?: { parameters?: { retry_after?: number } } })
+    ?.response?.parameters?.retry_after;
+  if (typeof retryAfter === "number" && retryAfter > 0) {
+    const until = Date.now() + retryAfter * 1_000;
+    blockedChatsUntil.set(String(chatId), until);
+    logger.warn(
+      { chatId, retryAfterSeconds: retryAfter, blockedUntil: new Date(until).toISOString() },
+      "Telegram issued a rate-limit block for this chat — pausing all sends to it until it clears"
+    );
+  }
+}
+
 function scheduleDirectSend(fn: () => Promise<void>): Promise<void> {
   directSendChain = directSendChain.then(async () => {
     const wait = Math.max(0, lastDirectSendAt + DIRECT_SEND_INTERVAL_MS - Date.now());
@@ -96,11 +124,18 @@ export async function queueMessage(
     return;
   }
 
+  if (isChatBlocked(chatId)) {
+    // Skip silently — already logged when the block was first recorded, no
+    // need to log the same known state on every subsequent attempt.
+    return;
+  }
+
   // Fallback: direct send, paced to avoid Telegram rate limits
   await scheduleDirectSend(async () => {
     try {
       await botRef?.telegram.sendMessage(chatId, text, extra);
     } catch (err) {
+      recordBlockIfPresent(chatId, err);
       logger.error({ chatId, err }, "Direct message send failed");
     }
   });
