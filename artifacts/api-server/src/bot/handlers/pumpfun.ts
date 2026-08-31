@@ -212,12 +212,8 @@ export function startPumpfunListener(dbUserId: number, telegramId: number, chatI
 
         if (freshConfig?.honeypotCheck !== false) {
           const sec = await checkSolanaToken(mint).catch(() => null);
-          if (sec?.isBlacklisted) {
-            await queueMessage(telegramId, `⛔ <b>Auto-Snipe Blocked</b> — ${symbolSafe}\n📍 <code>${mint}</code>\nToken is blacklisted.`, "HTML");
-            return;
-          }
-          if (sec?.hasMintAuthority) {
-            await queueMessage(telegramId, `⛔ <b>Auto-Snipe Blocked</b> — ${symbolSafe}\n📍 <code>${mint}</code>\nMint authority is still active — high rug risk.`, "HTML");
+          if (sec?.isBlacklisted || sec?.hasMintAuthority) {
+            // Silent skip, no message — not a real trade, no signal to send.
             return;
           }
         }
@@ -227,25 +223,17 @@ export function startPumpfunListener(dbUserId: number, telegramId: number, chatI
           where: and(eq(walletsTable.userId, dbUserId), eq(walletsTable.chain, "SOL"), eq(walletsTable.isActive, true)),
         });
         if (!freshWallet) {
-          await queueMessage(telegramId, `⚠️ <b>Auto-Snipe Skipped</b> — No SOL wallet found. Go to 💼 Wallet Manager to set one up.`, "HTML");
+          // Silent skip, no message — same reasoning as above.
           return;
         }
                 const currentBal = parseFloat(await getChainBalance("SOL", freshWallet.address).catch(() => "0"));
         const buyAmt = computeBuyAmount(freshConfig, "SOL", currentBal);
         if (buyAmt <= 0 || currentBal < buyAmt) {
-          await queueMessage(
-            telegramId,
-            [
-              `⚠️ <b>Auto-Snipe Skipped — Insufficient Balance</b>`,
-              `🪙 Token: <b>${symbolSafe}</b>`,
-              `📍 CA: <code>${mint}</code>`,
-              `💼 Your balance: <b>${currentBal.toFixed(4)} SOL</b>`,
-              `🛒 Required: <b>${buyAmt} SOL</b>`,
-              ``,
-              `Fund your wallet — this token stays queued and will auto-buy the moment your balance covers it (checked every minute for the next hour).`,
-            ].join("\n"),
-            "HTML"
-          );
+          // Silent skip, no message. This was the main source of sustained
+          // traffic: with balance at 0, this branch fired on nearly every
+          // token that cleared the filters above. The token still gets
+          // queued below so it auto-buys the moment the wallet is funded —
+          // only the notification is removed, not the underlying behavior.
           void queuePendingSnipe(dbUserId, telegramId, mint, symbol, name, priceUsd, liquidityUsd, buyAmt);
           return;
         }
