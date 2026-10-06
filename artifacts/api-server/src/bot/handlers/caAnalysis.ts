@@ -283,8 +283,14 @@ function buildOnchainOnlyCard(
   name: string,
   symbol: string,
   ca: string,
-  securityLines: string[]
+  securityLines: string[],
+  extra?: { description?: string; twitter?: string; telegram?: string; website?: string }
 ): string {
+  const links: string[] = [];
+  if (extra?.twitter) links.push(`<a href="${extra.twitter}">🐦 Twitter</a>`);
+  if (extra?.telegram) links.push(`<a href="${extra.telegram}">💬 Telegram</a>`);
+  if (extra?.website) links.push(`<a href="${extra.website}">🌐 Website</a>`);
+
   return [
     `🚀 <b>${name}</b> (<code>${symbol}</code>) — ${chainLabel}`,
     `<i>⛓️ Source: on-chain only — not yet indexed by any market data provider</i>`,
@@ -292,6 +298,10 @@ function buildOnchainOnlyCard(
     `⚠️ No price/liquidity data available yet. This token may be too new, or may not have an active trading pool.`,
     `—`,
     `📍 CA: <code>${ca}</code>`,
+    ...(links.length ? [`🔗 ${links.join(" | ")}`] : []),
+    ...(extra?.description
+      ? [`📝 ${extra.description.slice(0, 160)}${extra.description.length > 160 ? "…" : ""}`]
+      : []),
     `—`,
     ...securityLines,
   ].join("\n");
@@ -372,9 +382,15 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
 
     const onchain = await getSolTokenOnchainMetadata(ca);
     if (onchain) {
-      const fullText = buildOnchainOnlyCard("Solana", onchain.name, onchain.symbol, ca, securityLines);
+      const fullText = buildOnchainOnlyCard("Solana", onchain.name, onchain.symbol, ca, securityLines, {
+        description: onchain.description,
+        twitter: onchain.twitter,
+        telegram: onchain.telegram,
+        website: onchain.website,
+      });
       await ctx.reply(fullText, {
         parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
         ...Markup.inlineKeyboard(tradeButtonsFor(ca, { rugcheckTarget })),
       });
       return;
