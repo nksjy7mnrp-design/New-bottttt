@@ -11,6 +11,7 @@
  */
 
 import { Connection, PublicKey } from "@solana/web3.js";
+import { TOKEN_2022_PROGRAM_ID, getTokenMetadata } from "@solana/spl-token";
 
 const PUMP_PROGRAM_ID = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
 const BONDING_CURVE_SEED = Buffer.from("bonding-curve");
@@ -76,6 +77,30 @@ async function fetchMetaplexMetadata(
   }
 }
 
+/** Reads name/symbol/uri from a Token-2022 mint's on-chain "TokenMetadata"
+ *  extension (the Metadata Pointer standard). A growing number of newer
+ *  launchpads (Believe, Boop, some Bonk/LaunchLab tokens, Heaven, etc.)
+ *  mint with Token-2022 and store metadata directly in the mint account
+ *  this way instead of a separate legacy Metaplex PDA — the old
+ *  `fetchMetaplexMetadata` above never finds those. Returns null for any
+ *  mint that isn't Token-2022, or that is but has no metadata extension. */
+async function fetchToken2022Metadata(
+  connection: Connection,
+  mint: PublicKey
+): Promise<{ name: string; symbol: string; uri: string } | null> {
+  try {
+    const meta = await getTokenMetadata(connection, mint, "confirmed", TOKEN_2022_PROGRAM_ID);
+    if (!meta) return null;
+    return {
+      name: (meta.name || "").replace(/\0/g, "").trim(),
+      symbol: (meta.symbol || "").replace(/\0/g, "").trim(),
+      uri: (meta.uri || "").replace(/\0/g, "").trim(),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Best-effort fetch of the off-chain JSON (description/socials/image)
  *  that the on-chain metadata's `uri` points to. Never blocks the core
  *  price/reserve data if it fails or times out. */
@@ -107,23 +132,53 @@ export interface OnchainSolToken {
   mint: string;
   name: string;
   symbol: string;
+  description?: string;
+  imageUri?: string;
+  twitter?: string;
+  telegram?: string;
+  website?: string;
 }
 
 /**
  * Generic Solana metadata-only lookup — works for ANY SPL token with
- * standard Metaplex metadata, not just pump.fun ones. Used as the final
- * fallback when a token isn't on DexScreener, GeckoTerminal, or a pump.fun
- * bonding curve (e.g. a token that migrated off pump.fun's curve already,
- * or was never a pump.fun launch to begin with). No price/liquidity data —
- * just confirms the token exists on-chain and shows its name/symbol.
+ * on-chain metadata, not just pump.fun ones. Used as the final fallback
+ * when a token isn't on DexScreener, GeckoTerminal, or a pump.fun bonding
+ * curve (e.g. a token that migrated off pump.fun's curve already, was
+ * never a pump.fun launch, or comes from a launchpad DexScreener/Gecko
+ * haven't indexed yet). No price/liquidity data — just confirms the token
+ * exists on-chain and shows its name/symbol/socials.
+ *
+ * Tries two metadata standards, since different launchpads use different
+ * ones:
+ *   1. Legacy Metaplex Token Metadata (separate PDA) — covers Pump.fun
+ *      and most "classic" SPL tokens.
+ *   2. Token-2022's on-chain Metadata Pointer extension (stored inside the
+ *      mint account itself) — covers newer Token-2022 launchpads (Believe,
+ *      Boop, some Bonk/LaunchLab tokens, Heaven, etc.) that the legacy
+ *      lookup can never find because there's no separate PDA at all.
  */
 export async function getSolTokenOnchainMetadata(mint: string): Promise<OnchainSolToken | null> {
   try {
     const connection = getConnection();
     const mintPubkey = new PublicKey(mint);
-    const meta = await fetchMetaplexMetadata(connection, mintPubkey);
+
+    const meta =
+      (await fetchMetaplexMetadata(connection, mintPubkey)) ??
+      (await fetchToken2022Metadata(connection, mintPubkey));
     if (!meta) return null;
-    return { mint, name: meta.name || "Unknown", symbol: meta.symbol || "?" };
+
+    const offchain = meta.uri ? await fetchOffchainJson(meta.uri) : null;
+
+    return {
+      mint,
+      name: meta.name || "Unknown",
+      symbol: meta.symbol || "?",
+      description: offchain?.description,
+      imageUri: offchain?.image,
+      twitter: offchain?.twitter,
+      telegram: offchain?.telegram,
+      website: offchain?.website,
+    };
   } catch {
     return null;
   }
