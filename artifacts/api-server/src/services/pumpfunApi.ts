@@ -11,12 +11,41 @@
  */
 
 import { Connection, PublicKey } from "@solana/web3.js";
-import { TOKEN_2022_PROGRAM_ID, getTokenMetadata } from "@solana/spl-token";
 
 const PUMP_PROGRAM_ID = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
 const BONDING_CURVE_SEED = Buffer.from("bonding-curve");
 const METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 const METADATA_SEED = Buffer.from("metadata");
+
+// Token-2022: a mint account with on-chain extensions is laid out as
+// bytes 0-81 = legacy Mint fields, bytes 82-164 = reserved padding (so
+// Mint and Account buffers share the same base size), byte 165 = a 1-byte
+// account-type marker (1 = Mint, 2 = Account), then byte 166 onward = a
+// TLV (type/length/value) list of extensions. This is fixed program-level
+// layout, not something that changes per-token, so it's safe to hardcode
+// — no extra npm package needed just to read it.
+const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+const TOKEN_2022_ACCOUNT_SIZE = 165;
+const TOKEN_2022_ACCOUNT_TYPE_SIZE = 1;
+const TOKEN_2022_TLV_START = TOKEN_2022_ACCOUNT_SIZE + TOKEN_2022_ACCOUNT_TYPE_SIZE; // 166
+const EXTENSION_TYPE_TOKEN_METADATA = 19;
+
+/** Walks a Token-2022 TLV byte range looking for one extension type
+ *  (2-byte LE type + 2-byte LE length, back to back) and returns its
+ *  value bytes, or null if that extension isn't present. */
+function readTlvExtension(tlv: Buffer, extensionType: number): Buffer | null {
+  let i = 0;
+  while (i + 4 <= tlv.length) {
+    const entryType = tlv.readUInt16LE(i);
+    const entryLength = tlv.readUInt16LE(i + 2);
+    const valueStart = i + 4;
+    if (entryType === extensionType) {
+      return tlv.slice(valueStart, valueStart + entryLength);
+    }
+    i = valueStart + entryLength;
+  }
+  return null;
+}
 
 export interface PumpFunToken {
   mint: string;
@@ -89,13 +118,33 @@ async function fetchToken2022Metadata(
   mint: PublicKey
 ): Promise<{ name: string; symbol: string; uri: string } | null> {
   try {
-    const meta = await getTokenMetadata(connection, mint, "confirmed", TOKEN_2022_PROGRAM_ID);
-    if (!meta) return null;
-    return {
-      name: (meta.name || "").replace(/\0/g, "").trim(),
-      symbol: (meta.symbol || "").replace(/\0/g, "").trim(),
-      uri: (meta.uri || "").replace(/\0/g, "").trim(),
-    };
+    const info = await connection.getAccountInfo(mint);
+    if (!info) return null;
+    // Only Token-2022 mints carry extensions; a legacy-program mint or a
+    // base-size (no-extensions) Token-2022 mint has nothing to read here.
+    if (!info.owner.equals(TOKEN_2022_PROGRAM_ID)) return null;
+    if (info.data.length <= TOKEN_2022_TLV_START) return null;
+
+    const tlv = info.data.slice(TOKEN_2022_TLV_START);
+    const metadataTlv = readTlvExtension(tlv, EXTENSION_TYPE_TOKEN_METADATA);
+    if (!metadataTlv) return null;
+
+    // TokenMetadata value layout: updateAuthority(32) + mint(32), then
+    // name/symbol/uri as borsh strings (4-byte LE length + UTF8 bytes) —
+    // same string encoding as the legacy Metaplex parser above.
+    let offset = 32 + 32;
+    const nameLen = metadataTlv.readUInt32LE(offset); offset += 4;
+    const name = metadataTlv.slice(offset, offset + nameLen).toString("utf8").replace(/\0/g, "").trim();
+    offset += nameLen;
+
+    const symbolLen = metadataTlv.readUInt32LE(offset); offset += 4;
+    const symbol = metadataTlv.slice(offset, offset + symbolLen).toString("utf8").replace(/\0/g, "").trim();
+    offset += symbolLen;
+
+    const uriLen = metadataTlv.readUInt32LE(offset); offset += 4;
+    const uri = metadataTlv.slice(offset, offset + uriLen).toString("utf8").replace(/\0/g, "").trim();
+
+    return { name, symbol, uri };
   } catch {
     return null;
   }
