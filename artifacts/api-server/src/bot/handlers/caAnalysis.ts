@@ -9,6 +9,7 @@
  * which chain the user currently has selected.
  *
  * Waterfall (SOL):  DexScreener → GeckoTerminal → PumpFun bonding curve
+ *                    → Birdeye (any launchpad, needs BIRDEYE_API_KEY)
  *                    → generic on-chain metadata (any SPL token) → not found
  * Waterfall (EVM):  DexScreener (all chains) → GeckoTerminal (ETH/BASE/BSC
  *                    in parallel) → on-chain bytecode+ERC20 read (ETH/BASE/BSC
@@ -32,6 +33,7 @@ import {
   getSolTokenOnchainMetadata,
   type PumpFunToken,
 } from "../../services/pumpfunApi";
+import { getBirdeyeToken, type BirdeyeToken } from "../../services/birdeye";
 import { resolveEvmTokenOnchain, type OnchainEvmToken } from "../../services/evmOnchain";
 import { getNativeTokenPrice } from "../../services/chainPrice";
 import { checkEvmToken, checkSolanaToken } from "../../services/goplus";
@@ -277,6 +279,42 @@ function buildPumpFunCard(
   ].join("\n");
 }
 
+/** Build the full scored card for a Birdeye-only hit (any launchpad DexScreener/Gecko/PumpFun missed). */
+function buildBirdeyeCard(token: BirdeyeToken, securityLines: string[], securityRisks: number): string {
+  const input: ScoreInput = {
+    liquidityUsd: token.liquidityUsd,
+    volume24hUsd: token.volume24hUsd,
+    marketCapUsd: token.marketCapUsd,
+    priceChange24h: token.priceChange24hPercent,
+    securityRisks,
+  };
+  const result = scoreToken(input);
+
+  const links: string[] = [];
+  if (token.twitter) links.push(`<a href="${token.twitter}">🐦 Twitter</a>`);
+  if (token.telegram) links.push(`<a href="${token.telegram}">💬 Telegram</a>`);
+  if (token.website) links.push(`<a href="${token.website}">🌐 Website</a>`);
+
+  return [
+    `🚀 <b>${token.name}</b> (<code>${token.symbol}</code>)`,
+    `<i>🦅 Source: Birdeye (any launchpad — not yet on DexScreener/Gecko)</i>`,
+    `—`,
+    formatScoreBlock(result),
+    `—`,
+    `💲 Price  <b>$${token.priceUsd.toFixed(8)}</b>`,
+    `🏦 Market Cap  ${token.marketCapUsd > 0 ? fmtUsd(token.marketCapUsd) : "N/A"}`,
+    `💧 Liquidity  ${fmtUsd(token.liquidityUsd)}`,
+    `📊 Vol 24h  ${fmtUsd(token.volume24hUsd)}`,
+    ...(token.priceChange24hPercent !== undefined ? [`📈 24h: ${sign(token.priceChange24hPercent)}%`] : []),
+    ...(token.holders ? [`👥 Holders  ${token.holders}`] : []),
+    `—`,
+    `📍 CA: <code>${token.mint}</code>`,
+    ...(links.length ? [`🔗 ${links.join(" | ")}`] : []),
+    `—`,
+    ...securityLines,
+  ].join("\n");
+}
+
 /** Minimal card for tokens found only via raw on-chain lookup (no indexer coverage yet). */
 function buildOnchainOnlyCard(
   chainLabel: string,
@@ -380,6 +418,23 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
       return;
     }
 
+    const birdeyeToken = await getBirdeyeToken(ca);
+    if (birdeyeToken) {
+      const fullText = buildBirdeyeCard(birdeyeToken, securityLines, securityRisks);
+      if (user) {
+        void db.insert(signalsTable).values({
+          userId: user.id, tokenAddress: ca, tokenSymbol: birdeyeToken.symbol,
+          chain: "SOL", source: "MANUAL", priceUsd: String(birdeyeToken.priceUsd),
+        });
+      }
+      await ctx.reply(fullText, {
+        parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
+        ...Markup.inlineKeyboard(tradeButtonsFor(ca, { rugcheckTarget })),
+      });
+      return;
+    }
+
     const onchain = await getSolTokenOnchainMetadata(ca);
     if (onchain) {
       const fullText = buildOnchainOnlyCard("Solana", onchain.name, onchain.symbol, ca, securityLines, {
@@ -401,7 +456,7 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
         `❓ <b>Token not found</b>`,
         `CA: <code>${ca}</code>`,
         ``,
-        `Checked: DexScreener, GeckoTerminal, PumpFun, on-chain metadata.`,
+        `Checked: DexScreener, GeckoTerminal, PumpFun, Birdeye, on-chain metadata.`,
         `This mint doesn't appear to exist, or isn't a token account.`,
       ].join("\n"),
       { parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("⬅️ Dashboard", "dashboard")]]) }
