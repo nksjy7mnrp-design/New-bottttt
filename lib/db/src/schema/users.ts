@@ -10,6 +10,7 @@ export const usersTable = pgTable("bot_users", {
   activeChain: text("active_chain").notNull().default("SOL"),
   autoSnipe: boolean("auto_snipe").notNull().default(false),
   scannerActive: boolean("scanner_active").notNull().default(false),
+  isBlocked: boolean("is_blocked").notNull().default(false),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
