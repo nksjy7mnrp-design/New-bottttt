@@ -83,6 +83,7 @@ import {
   handleLivePrice,
   processCustomBuyAmount,
   getPendingCustomBuy,
+  handleDisableAutoExit,
 } from "./handlers/trade";
 import { initMessageQueue } from "../workers/messageQueue";
 import { setBotRef } from "../lib/botRef";
@@ -400,6 +401,11 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   bot.action(/^price:(.+)$/, async (ctx) => {
     const ca = (ctx.match as RegExpMatchArray)[1] ?? "";
     await handleLivePrice(ctx, ca);
+  });
+
+  bot.action(/^autoexit_off:(\d+)$/, async (ctx) => {
+    const positionId = (ctx.match as RegExpMatchArray)[1] ?? "";
+    await handleDisableAutoExit(ctx, positionId);
   });
 
   // ── Text handler — CA detection + multi-step flows ──────────────────────
