@@ -61,6 +61,13 @@ import {
   handleSnipeConfirmPreview,
 } from "./handlers/manualSnipe";
 import { handleBotStats } from "./handlers/botStats";
+import {
+  handleBlockCommand,
+  handleUnblockCommand,
+  handleListBlockedCommand,
+  isUserBlocked,
+  isAdmin,
+} from "./handlers/adminBlock";
 
 import { handleHelpGuide } from "./handlers/helpGuide";
 import {
@@ -124,6 +131,22 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
     ctx.reply("⚠️ An internal error occurred. Please try again.").catch(() => {});
   });
 
+  // ── Global middleware: block-list gate, runs before anything else.
+  //    A blocked user gets zero response — no reply, no error, as if the
+  //    bot doesn't exist for them. We still answer callback queries so
+  //    they don't see Telegram's loading spinner hang forever on a tap.
+  bot.use(async (ctx, next) => {
+    const fromId = ctx.from?.id;
+    if (fromId && !isAdmin(fromId)) {
+      const blocked = await isUserBlocked(fromId).catch(() => false);
+      if (blocked) {
+        if (ctx.callbackQuery) ctx.answerCbQuery().catch(() => {});
+        return;
+      }
+    }
+    return next();
+  });
+
   // ── Global middleware: instantly dismiss the loading spinner on every
   //    inline-button tap so users never see the clock animation.
   bot.use(async (ctx, next) => {
@@ -161,6 +184,13 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   bot.command("settings",  async (ctx) => handleSettings(ctx));
   bot.command("filters",   async (ctx) => handleFilters(ctx));
   bot.command("help",      async (ctx) => handleHelpGuide(ctx));
+
+  // ── Admin-only: block/unblock a Telegram user from using the bot.
+  //    Not in BOT_COMMANDS/the menu on purpose — these are owner-only and
+  //    silently no-op for anyone whose ID isn't ADMIN_TELEGRAM_ID_1/_2.
+  bot.command("block",     async (ctx) => handleBlockCommand(ctx));
+  bot.command("unblock",   async (ctx) => handleUnblockCommand(ctx));
+  bot.command("blocked",   async (ctx) => handleListBlockedCommand(ctx));
 
   // ── Callback Queries ────────────────────────────────────────────────────
   bot.action("dashboard",      (ctx) => renderDashboard(ctx, true));
