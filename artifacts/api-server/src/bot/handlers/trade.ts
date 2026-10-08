@@ -14,6 +14,7 @@ import {
   tradesTable,
   sniperConfigsTable,
   activeSnipesTable,
+  positionsTable,
 } from "@workspace/db";
 import { eq, and, desc } from "drizzle-orm";
 import { decrypt } from "../../lib/encryption";
@@ -27,6 +28,7 @@ import { pickTradingWallet, markWalletUsed } from "../../services/walletRotation
 import { searchGeckoToken } from "../../services/geckoTerminal";
 import { getPumpFunToken } from "../../services/pumpfunApi";
 import { getNativeTokenPrice } from "../../services/chainPrice";
+import { scoreToken, type ScoreInput } from "../../services/tokenScore";
 import { detectCAType } from "./caAnalysis";
 import { logger } from "../../lib/logger";
 import { registerPendingClearer } from "../../lib/pendingFlows";
@@ -217,6 +219,148 @@ async function executeSolBuy(params: SolBuyParams): Promise<SolBuyResult> {
   return { txHash, outAmount: String(lamports) };
 }
 
+// ── Core SOL sell execution ──────────────────────────────────────────────
+// Extracted from executeSell so both the manual /sell flow and the
+// automated TP/SL position monitor (positionMonitor.ts) share one path
+// instead of two copies of the same quote/build/sign/send logic.
+
+interface SolSellParams {
+  walletAddress: string;
+  encryptedPrivateKey: string;
+  ca: string;
+  percent: number;
+  slippageBps: number;
+  jitoTipLamports: number;
+}
+
+interface SolSellResult {
+  txHash: string;
+}
+
+async function executeSolSell(params: SolSellParams): Promise<SolSellResult> {
+  const { walletAddress, encryptedPrivateKey, ca, percent, slippageBps, jitoTipLamports } = params;
+
+  const rpcUrl = process.env["SOLANA_RPC_URL"] ?? "https://api.mainnet-beta.solana.com";
+  const balRes = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: 1,
+      method: "getTokenAccountsByOwner",
+      params: [walletAddress, { mint: ca }, { encoding: "jsonParsed" }],
+    }),
+  });
+  const balData = (await balRes.json()) as {
+    result?: { value?: { account?: { data?: { parsed?: { info?: { tokenAmount?: { amount?: string } } } } } }[] };
+  };
+  const rawAmount = balData.result?.value?.[0]?.account?.data?.parsed?.info?.tokenAmount?.amount ?? "0";
+  const sellAmount = Math.floor((parseInt(rawAmount, 10) * percent) / 100);
+  if (sellAmount === 0) throw new Error("No token balance to sell");
+
+  const privateKey = decrypt(encryptedPrivateKey);
+  const { Keypair, VersionedTransaction } = await import("@solana/web3.js");
+  const bs58 = await import("bs58");
+  const kp = Keypair.fromSecretKey(bs58.default.decode(privateKey));
+  const actualSignerPubKey = kp.publicKey.toBase58();
+
+  let swapTxBase64: string | null = null;
+  let jupiterFailReason = "";
+  let pumpPortalFailReason = "";
+
+  try {
+    const quote = await getJupiterQuote(ca, SOL_MINT, sellAmount, slippageBps);
+    swapTxBase64 = await buildJupiterSwapTx(quote, actualSignerPubKey, SOL_MINT, jitoTipLamports);
+  } catch (jupErr) {
+    jupiterFailReason = jupErr instanceof Error ? jupErr.message : String(jupErr);
+    logger.info({ jupErr: jupiterFailReason, ca }, "Jupiter sell build failed — checking PumpPortal fallback");
+  }
+
+  if (!swapTxBase64) {
+    try {
+      // Sell by percentage of current holdings: PumpPortal accepts "N%" as
+      // amount with denominatedInSol=false, and pool "auto" finds the token
+      // wherever it now trades.
+      swapTxBase64 = await buildPumpPortalTx(actualSignerPubKey, "sell", ca, `${percent}%`, false, 15);
+    } catch (ppErr) {
+      pumpPortalFailReason = ppErr instanceof Error ? ppErr.message : String(ppErr);
+      logger.warn({ ppErr: pumpPortalFailReason, ca }, "PumpPortal sell fallback failed");
+    }
+  }
+
+  if (!swapTxBase64) {
+    throw new Error(
+      `No route found on Jupiter or Pump.fun.\nJupiter: ${jupiterFailReason || "no route"}\nPumpPortal: ${pumpPortalFailReason || "no route"}`
+    );
+  }
+
+  const txBytes = Buffer.from(swapTxBase64, "base64");
+  const vTx = VersionedTransaction.deserialize(txBytes);
+  vTx.sign([kp]);
+  const signedBase64 = Buffer.from(vTx.serialize()).toString("base64");
+
+  const txHash = await sendSolanaTxDirect(signedBase64);
+  if (!txHash) throw new Error("Transaction broadcast failed.");
+
+  return { txHash };
+}
+
+/**
+ * Ctx-free sell entry point used by the automated position monitor (no
+ * Telegram update to reply to — notifications go through queueMessage
+ * instead). Looks up the wallet by id, sells `percent` of the token via
+ * the same SOL sell path as the manual flow, and records a trade row.
+ */
+export async function sellPositionCore(
+  walletId: number,
+  ca: string,
+  percent: number
+): Promise<{ ok: true; txHash: string } | { ok: false; error: string }> {
+  try {
+    const wallet = await db.query.walletsTable.findFirst({ where: eq(walletsTable.id, walletId) });
+    if (!wallet) return { ok: false, error: "Wallet not found" };
+
+    const config = await db.query.sniperConfigsTable.findFirst({
+      where: eq(sniperConfigsTable.userId, wallet.userId),
+    });
+    const slippageBps = config?.slippageBps ?? 1000;
+    const jitoTip = config?.jitoTipLamports ?? getJitoTipLamports();
+
+    const result = await executeSolSell({
+      walletAddress: wallet.address,
+      encryptedPrivateKey: wallet.encryptedPrivateKey,
+      ca,
+      percent,
+      slippageBps,
+      jitoTipLamports: jitoTip,
+    });
+
+    await db.insert(tradesTable).values({
+      userId: wallet.userId,
+      chain: "SOL",
+      tokenAddress: ca,
+      tokenSymbol: "AUTO",
+      tokenName: "AUTO",
+      side: "SELL",
+      amountIn: `${percent}%`,
+      feeBps: PLATFORM_FEE_BPS,
+      priceUsd: "0",
+      status: "CONFIRMED",
+      txHash: result.txHash,
+    });
+
+    if (percent === 100) {
+      await db
+        .update(activeSnipesTable)
+        .set({ active: false })
+        .where(and(eq(activeSnipesTable.userId, wallet.userId), eq(activeSnipesTable.tokenAddress, ca)));
+    }
+
+    return { ok: true, txHash: result.txHash };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 async function getSolBalanceLamports(address: string): Promise<number> {
   const rpcUrl = process.env["SOLANA_RPC_URL"] ?? "https://api.mainnet-beta.solana.com";
   try {
@@ -374,16 +518,59 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
       .where(eq(tradesTable.id, trade!.id));
     void markWalletUsed(wallet.id);
 
+    // Auto TP/SL: only for SOL (the only chain the position monitor can
+    // currently sell for), and only when we actually have a real entry
+    // price to measure targets against.
+    let exitLine = "";
+    let autoExitButton: ReturnType<typeof Markup.button.callback> | null = null;
+    const entryPriceNum = parseFloat(priceUsd);
+    if (user.activeChain === "SOL" && entryPriceNum > 0) {
+      const ageMinutes = pair?.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 60_000 : undefined;
+      const input: ScoreInput = {
+        liquidityUsd: pair?.liquidity?.usd ?? 0,
+        volume24hUsd: pair?.volume?.h24 ?? 0,
+        marketCapUsd: pair?.marketCap ?? pair?.fdv ?? 0,
+        buys24h: pair?.txns?.h24?.buys,
+        sells24h: pair?.txns?.h24?.sells,
+        priceChange5m: pair?.priceChange?.m5,
+        priceChange1h: pair?.priceChange?.h1,
+        priceChange24h: pair?.priceChange?.h24,
+        ageMinutes,
+        securityRisks: 0, // not re-checked here; this only shapes the exit %, not the buy decision
+      };
+      const { exitPlan } = scoreToken(input);
+
+      const [position] = await db.insert(positionsTable).values({
+        userId: user.id,
+        telegramId,
+        walletId: wallet.id,
+        chain: "SOL",
+        tokenAddress: ca,
+        tokenSymbol,
+        entryPriceUsd: priceUsd,
+        tp1Pct: exitPlan.tp1,
+        tp2Pct: exitPlan.tp2,
+        slPct: exitPlan.sl,
+        trailingStopEnabled: exitPlan.trailingStop,
+      }).returning();
+
+      exitLine = `🎯 Auto-Exit armed: TP1 +${exitPlan.tp1}% | TP2 +${exitPlan.tp2}% | SL ${exitPlan.sl}%${exitPlan.trailingStop ? " | Trailing stop ON" : ""}\n`;
+      if (position) {
+        autoExitButton = Markup.button.callback("🔕 Disable Auto-Exit", `autoexit_off:${position.id}`);
+      }
+    }
+
     await ctx.reply(
       [
         `✅ <b>Buy Confirmed!</b>`,
         `🪙 <b>${tokenName}</b> [${tokenSymbol}] — ${user.activeChain}`,
         `💰 Spent: <b>${amount} ${user.activeChain}</b>`,
-        `💲 Price at entry: <b>${parseFloat(priceUsd).toFixed(8)}</b>`,
+        `💲 Price at entry: <b>${entryPriceNum.toFixed(8)}</b>`,
         `🔗 TX: <code>${txHash}</code>`,
         `—`,
+        exitLine,
         `Use the buttons below to sell your position.`,
-      ].join("\n"),
+      ].filter(Boolean).join("\n"),
       {
         parse_mode: "HTML",
         ...Markup.inlineKeyboard([
@@ -399,6 +586,7 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
             Markup.button.callback("📊 Live Price", `price:${ca}`),
             Markup.button.callback("🔍 Analyze Token", `analyze:${ca}`),
           ],
+          ...(autoExitButton ? [[autoExitButton]] : []),
           [Markup.button.callback("⬅️ Dashboard", "dashboard")],
         ]),
       }
@@ -411,6 +599,25 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
       { parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("⬅️ Dashboard", "dashboard")]]) }
     );
   }
+}
+
+/** Disable auto-exit for one position — called from the "🔕 Disable
+ *  Auto-Exit" button on the buy-confirmed message. Verifies the position
+ *  belongs to whoever tapped the button before touching it. */
+export async function handleDisableAutoExit(ctx: Context, positionIdStr: string): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+  const positionId = parseInt(positionIdStr, 10);
+  if (isNaN(positionId)) return;
+
+  const position = await db.query.positionsTable.findFirst({ where: eq(positionsTable.id, positionId) });
+  if (!position || position.telegramId !== telegramId) {
+    await ctx.reply("❌ Position not found.");
+    return;
+  }
+
+  await db.update(positionsTable).set({ autoExitEnabled: false, updatedAt: new Date() }).where(eq(positionsTable.id, positionId));
+  await ctx.reply(`🔕 Auto-exit disabled for ${position.tokenSymbol}. You're back to manual sells only for this position.`);
 }
 
 // ── Auto-snipe buy ───────────────────────────────────────────────────────
@@ -618,75 +825,21 @@ async function executeSell(ctx: Context, ca: string, percent: number): Promise<v
     let txHash: string | null = null;
 
     if (user.activeChain === "SOL") {
-      const rpcUrl = process.env["SOLANA_RPC_URL"] ?? "https://api.mainnet-beta.solana.com";
-      const balRes = await fetch(rpcUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0", id: 1,
-          method: "getTokenAccountsByOwner",
-          params: [wallet.address, { mint: ca }, { encoding: "jsonParsed" }],
-        }),
-      });
-      const balData = await balRes.json() as {
-        result?: { value?: { account?: { data?: { parsed?: { info?: { tokenAmount?: { amount?: string } } } } } }[] };
-      };
-      const rawAmount = balData.result?.value?.[0]?.account?.data?.parsed?.info?.tokenAmount?.amount ?? "0";
-      const sellAmount = Math.floor(parseInt(rawAmount, 10) * percent / 100);
-      if (sellAmount === 0) throw new Error("No token balance to sell");
-
       const config = await db.query.sniperConfigsTable.findFirst({
         where: eq(sniperConfigsTable.userId, user.id),
       });
       const slippageBps = config?.slippageBps ?? 1000;
       const jitoTip = config?.jitoTipLamports ?? getJitoTipLamports();
 
-      const privateKey = decrypt(wallet.encryptedPrivateKey);
-      const { Keypair, VersionedTransaction } = await import("@solana/web3.js");
-      const bs58 = await import("bs58");
-      const kp = Keypair.fromSecretKey(bs58.default.decode(privateKey));
-      const actualSignerPubKey = kp.publicKey.toBase58();
-
-      let swapTxBase64: string | null = null;
-      let jupiterFailReason = "";
-      let pumpPortalFailReason = "";
-
-      try {
-        const quote = await getJupiterQuote(ca, SOL_MINT, sellAmount, slippageBps);
-        swapTxBase64 = await buildJupiterSwapTx(quote, actualSignerPubKey, SOL_MINT, jitoTip);
-      } catch (jupErr) {
-        jupiterFailReason = jupErr instanceof Error ? jupErr.message : String(jupErr);
-        logger.info({ jupErr: jupiterFailReason, ca }, "Jupiter sell build failed — checking PumpPortal fallback");
-      }
-
-      if (!swapTxBase64) {
-        try {
-          // Sell by percentage of current holdings: PumpPortal accepts "N%"
-          // as amount with denominatedInSol=false. The previous code passed
-          // the raw percent (e.g. 100) with denominatedInSol hardcoded
-          // "true", which told PumpPortal to sell 100 SOL *worth* of the
-          // token instead of 100% of the position — pool "auto" also
-          // applies here so it finds the token wherever it now trades.
-          swapTxBase64 = await buildPumpPortalTx(actualSignerPubKey, "sell", ca, `${percent}%`, false, 15);
-        } catch (ppErr) {
-          pumpPortalFailReason = ppErr instanceof Error ? ppErr.message : String(ppErr);
-          logger.warn({ ppErr: pumpPortalFailReason, ca }, "PumpPortal sell fallback failed");
-        }
-      }
-
-      if (!swapTxBase64) {
-        throw new Error(
-          `No route found on Jupiter or Pump.fun.\nJupiter: ${jupiterFailReason || "no route"}\nPumpPortal: ${pumpPortalFailReason || "no route"}`
-        );
-      }
-
-      const txBytes = Buffer.from(swapTxBase64, "base64");
-      const vTx = VersionedTransaction.deserialize(txBytes);
-      vTx.sign([kp]);
-      const signedBase64 = Buffer.from(vTx.serialize()).toString("base64");
-
-      txHash = await sendSolanaTxDirect(signedBase64);
-      if (!txHash) throw new Error("Transaction broadcast failed.");
+      const result = await executeSolSell({
+        walletAddress: wallet.address,
+        encryptedPrivateKey: wallet.encryptedPrivateKey,
+        ca,
+        percent,
+        slippageBps,
+        jitoTipLamports: jitoTip,
+      });
+      txHash = result.txHash;
 
       await db.update(tradesTable)
         .set({ status: "CONFIRMED", txHash, amountOut: `${percent}%` })
