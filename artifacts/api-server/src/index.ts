@@ -67,6 +67,8 @@ if (botToken) {
   startSnipeMonitor();
   const { startPendingSnipeQueue } = await import("./services/pendingSnipeQueue");
   startPendingSnipeQueue();
+  const { startPositionMonitor } = await import("./services/positionMonitor");
+  startPositionMonitor();
 
   // The PumpFun/Auto-Snipe listener only lives in memory — every deploy or
   // restart wipes it out. Without this, users would need to manually
